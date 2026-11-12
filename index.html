@@ -3,6 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <title>お料理教室 - クッキングシミュレーション</title>
+  <!-- 高速Google STUN対応 PeerJS -->
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -238,7 +240,7 @@
       background: #1e272e;
       padding: 8px;
       border-radius: 8px;
-      margin: 12px 0;
+      margin: 10px 0;
       border: 2px dashed #fbc531;
     }
     .code-input {
@@ -257,7 +259,7 @@
       background: #2f3542;
       padding: 10px;
       border-radius: 8px;
-      margin: 12px 0;
+      margin: 10px 0;
       text-align: left;
       font-size: 13px;
       display: flex;
@@ -268,8 +270,18 @@
     .net-status {
       font-size: 12px;
       color: #4cd137;
-      margin-bottom: 4px;
+      margin-bottom: 6px;
       font-weight: bold;
+      background: #1e272e;
+      padding: 4px 10px;
+      border-radius: 12px;
+      display: inline-block;
+    }
+    .net-status.waiting {
+      color: #fbc531;
+    }
+    .net-status.error {
+      color: #ff4757;
     }
   </style>
 </head>
@@ -331,7 +343,7 @@
 
         <!-- 画面2: リーダー部屋作成ロビー -->
         <div id="view-host" class="lobby-box" style="display: none;">
-          <div class="net-status" id="host-net-status">🟢 オンライン通信サーバー接続中...</div>
+          <div><span class="net-status waiting" id="host-net-status">🟡 通信準備中...</span></div>
           <h3 style="color:#fbc531; font-size: 22px;">👑 ルームを作成しました！</h3>
           <p style="font-size: 13px; color:#dcdde1; margin-top: 4px;">友達にこの<strong>4桁のパスワード</strong>を教えてね：</p>
           <div class="room-code-display" id="host-code-display">----</div>
@@ -356,9 +368,9 @@
 
         <!-- 画面4: 参加者待機ロビー -->
         <div id="view-client-waiting" class="lobby-box" style="display: none;">
-          <div class="net-status" id="client-net-status">🟢 部屋に接続中...</div>
+          <div><span class="net-status waiting" id="client-net-status">🟡 リーダーに接続中...</span></div>
           <h3 style="color:#4cd137; font-size: 22px;">🎉 参加完了！</h3>
-          <p style="font-size: 13px; color:#dcdde1; margin-top: 6px;">リーダーがゲームを開始すると自動でスタートします！</p>
+          <p style="font-size: 13px; color:#dcdde1; margin-top: 4px;">リーダーがゲームを開始すると自動でスタートします！</p>
           <div class="room-code-display" id="client-code-display">----</div>
           
           <div style="font-size: 13px; color:#a4b0be; text-align: left;">現在のメンバー:</div>
@@ -492,10 +504,25 @@
     let timeLeft = 70;
     let timerInterval = null;
 
-    // 通信オブジェクト (標準WebSocket ポート443)
-    let netWs = null;
-    let netHeartbeatTimer = null;
+    // P2P WebRTC PeerJS接続
+    let peer = null;
+    let hostConnections = [];
+    let guestConnection = null;
+
+    // 同一PC用通信
     let broadcastChan = null;
+    let localPollInterval = null;
+
+    const PEER_CONFIG = {
+      config: {
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' },
+          { urls: 'stun:stun2.l.google.com:19302' },
+          { urls: 'stun:stun3.l.google.com:19302' }
+        ]
+      }
+    };
 
     const PLAYER_DEFAULTS = [
       { id: 1, name: '1P (青)', color: '#0984e3', startX: 300, startY: 260 },
@@ -505,7 +532,6 @@
 
     let players = [];
 
-    // 調理ステーション
     const stations = [
       { id: 'box_tomato',  x: 20,  y: 25, w: 70, h: 70, type: 'box', item: 'tomato', name: 'トマト箱' },
       { id: 'box_lettuce', x: 100, y: 25, w: 70, h: 70, type: 'box', item: 'lettuce', name: 'レタス箱' },
@@ -558,7 +584,13 @@
         const me = players.find(p => p.id === myPlayerId);
         if (me) {
           interact(me);
-          broadcastMyPlayer();
+          sendNetMessage({
+            type: 'PLAYER_MOVE',
+            id: me.id,
+            x: me.x, y: me.y,
+            direction: me.direction,
+            holding: me.holding
+          });
         }
       }
     });
@@ -573,70 +605,36 @@
     }
 
     /* ========================================================
-       4. 超安定オンライン通信 (ntfy.sh ポート443 WebSocket + LocalStorage)
+       4. ハイブリッド通信層 (WebRTC + LocalStorage/BroadcastChannel)
        ======================================================== */
-    function getTopicUrl(code) {
-      return `motu_cook_${code}`;
-    }
-
-    function setupOnlineConnection(code, onOpen) {
-      roomCode = code;
-      const topic = getTopicUrl(code);
-
-      // 1. 同一PC用 BroadcastChannel
-      try {
-        if (broadcastChan) broadcastChan.close();
-        broadcastChan = new BroadcastChannel(`motu_chan_${code}`);
-        broadcastChan.onmessage = (e) => handleNetworkMessage(e.data);
-      } catch(e){}
-
-      // 2. クラウドWebSocket (標準ポート443で絶対にブロックされない)
-      if (netWs) netWs.close();
-      netWs = new WebSocket(`wss://ntfy.sh/${topic}/ws`);
-
-      netWs.onopen = () => {
-        console.log('Online WebSocket connected successfully!');
-        if (onOpen) onOpen();
-      };
-
-      netWs.onmessage = (event) => {
-        try {
-          const envelope = JSON.parse(event.data);
-          if (envelope.event === 'message') {
-            const msg = JSON.parse(envelope.message);
-            if (msg.from !== myClientId) {
-              handleNetworkMessage(msg);
-            }
-          }
-        } catch(e){}
-      };
-
-      netWs.onerror = (err) => console.log('WS error:', err);
+    function getHostPeerId(code) {
+      return `motu-kitchen-${code}`;
     }
 
     function sendNetMessage(msg) {
-      if (!roomCode) return;
-      const payload = { ...msg, from: myClientId, time: Date.now() };
-      const topic = getTopicUrl(roomCode);
+      const payload = { ...msg, from: myClientId };
 
-      // A. クラウドPOST送信
-      fetch(`https://ntfy.sh/${topic}`, {
-        method: 'POST',
-        body: JSON.stringify(payload)
-      }).catch(e => console.log('Fetch send error:', e));
+      // 1. WebRTC送信
+      if (isHost) {
+        hostConnections.forEach(c => {
+          if (c && c.open) c.send(payload);
+        });
+      } else if (guestConnection && guestConnection.open) {
+        guestConnection.send(payload);
+      }
 
-      // B. 同一PC内ブロードキャスト
+      // 2. 同一PC用送信
       if (broadcastChan) {
         broadcastChan.postMessage(payload);
       }
       try {
-        localStorage.setItem(`motu_ls_${roomCode}`, JSON.stringify(payload));
+        localStorage.setItem(`motu_shared_msg_${roomCode}`, JSON.stringify({ ...payload, _t: Date.now() }));
       } catch(e){}
     }
 
-    // LocalStorageバックアップ
+    // 同一PCのLocalStorage監視
     window.addEventListener('storage', (e) => {
-      if (e.key === `motu_ls_${roomCode}` && e.newValue) {
+      if (e.key === `motu_shared_msg_${roomCode}` && e.newValue) {
         try {
           const msg = JSON.parse(e.newValue);
           if (msg.from !== myClientId) handleNetworkMessage(msg);
@@ -644,13 +642,12 @@
       }
     });
 
-    // ネットワークメッセージ処理
     function handleNetworkMessage(msg) {
       if (!msg) return;
 
-      // 1. ホスト側が受ける参加通知
+      // 1. リーダーが受ける参加リクエスト
       if (isHost) {
-        if (msg.type === 'PLAYER_JOIN') {
+        if (msg.type === 'GUEST_JOIN') {
           let existing = players.find(p => p.clientId === msg.clientId);
           if (!existing && players.length < 3) {
             const newSlot = players.length + 1;
@@ -665,18 +662,20 @@
             });
             renderMemberList('host-member-list', players);
           }
-          // すぐに全員へ最新メンバー一覧をブロードキャスト返信！
+          // すぐにメンバー一覧をブロードキャスト返信
           broadcastMembers();
         }
       }
 
-      // 2. ゲスト側が受けるメンバー一覧同期
+      // 2. ゲストが受けるメンバー同期
       if (!isHost) {
         if (msg.type === 'MEMBERS_SYNC') {
-          const myIndex = msg.members.findIndex(m => m.clientId === myClientId);
-          if (myIndex !== -1) {
-            myPlayerId = myIndex + 1;
-            document.getElementById('client-net-status').innerText = '🟢 リーダーに認識されました！(準備完了)';
+          const myIdx = msg.members.findIndex(m => m.clientId === myClientId);
+          if (myIdx !== -1) {
+            myPlayerId = myIdx + 1;
+            const statusEl = document.getElementById('client-net-status');
+            statusEl.className = 'net-status';
+            statusEl.innerText = '🟢 リーダーに認識されました！(準備完了)';
           }
           renderMemberList('client-member-list', msg.members);
         }
@@ -689,7 +688,7 @@
         }
       }
 
-      // 3. ゲームプレイ中の同期
+      // 3. ゲーム中同期
       if (isGameRunning) {
         if (msg.type === 'PLAYER_MOVE') {
           const target = players.find(p => p.id === msg.id);
@@ -731,23 +730,9 @@
       });
     }
 
-    function broadcastMyPlayer() {
-      const me = players.find(p => p.id === myPlayerId);
-      if (!me) return;
-      sendNetMessage({
-        type: 'PLAYER_MOVE',
-        id: me.id,
-        x: me.x,
-        y: me.y,
-        direction: me.direction,
-        holding: me.holding
-      });
-    }
-
     /* ========================================================
-       5. 画面遷移 & ロビー制御
+       5. 画面遷移 & 接続制御
        ======================================================== */
-    // 1. シングル
     function startSingleGame() {
       myPlayerName = getPlayerName();
       currentMode = 'single';
@@ -773,11 +758,12 @@
       updateUI();
     }
 
-    // 2. ホスト: 部屋作成
+    // ホスト: 部屋作成
     function showHostLobby() {
       myPlayerName = getPlayerName();
       isHost = true;
       myPlayerId = 1;
+      hostConnections = [];
 
       roomCode = Math.floor(1000 + Math.random() * 9000).toString();
       document.getElementById('host-code-display').innerText = roomCode;
@@ -792,17 +778,53 @@
 
       document.getElementById('view-title').style.display = 'none';
       document.getElementById('view-host').style.display = 'block';
-      document.getElementById('host-net-status').innerText = '🟢 オンライン待機サーバー接続中...';
+
+      const statusEl = document.getElementById('host-net-status');
+      statusEl.className = 'net-status waiting';
+      statusEl.innerText = '🟡 通信待機サーバーに接続中...';
 
       renderMemberList('host-member-list', players);
 
-      setupOnlineConnection(roomCode, () => {
-        document.getElementById('host-net-status').innerText = '🟢 オンライン接続完了！参加者を待機中';
-        // ホストから定期的にハートビート配信
-        if (netHeartbeatTimer) clearInterval(netHeartbeatTimer);
-        netHeartbeatTimer = setInterval(() => {
-          if (isHost && !isGameRunning) broadcastMembers();
-        }, 1500);
+      // 同一PC用ブロードキャスト
+      try {
+        if (broadcastChan) broadcastChan.close();
+        broadcastChan = new BroadcastChannel(`motu_chan_${roomCode}`);
+        broadcastChan.onmessage = (e) => handleNetworkMessage(e.data);
+      } catch(e){}
+
+      // WebRTC PeerJS ホスト起動
+      const hostId = getHostPeerId(roomCode);
+      if (peer) peer.destroy();
+      peer = new Peer(hostId, PEER_CONFIG);
+
+      peer.on('open', (id) => {
+        statusEl.className = 'net-status';
+        statusEl.innerText = '🟢 オンライン待機中！友達を待っています';
+      });
+
+      peer.on('connection', (conn) => {
+        hostConnections.push(conn);
+        conn.on('open', () => {
+          // 接続されたらメンバー一覧を送る
+          broadcastMembers();
+        });
+        conn.on('data', (data) => {
+          handleNetworkMessage(data);
+        });
+        conn.on('close', () => {
+          hostConnections = hostConnections.filter(c => c !== conn);
+        });
+      });
+
+      peer.on('error', (err) => {
+        console.log('Peer error:', err);
+        if (err.type === 'unavailable-id') {
+          // ID衝突時は再生成
+          showHostLobby();
+        } else {
+          statusEl.className = 'net-status waiting';
+          statusEl.innerText = '🟡 ローカル接続待機中 (合言葉で参加可能)';
+        }
       });
     }
 
@@ -821,7 +843,6 @@
       initMultiGame(memberList);
     }
 
-    // 3. 参加者: 部屋に入る
     function showJoinLobby() {
       myPlayerName = getPlayerName();
       document.getElementById('view-title').style.display = 'none';
@@ -829,6 +850,7 @@
       document.getElementById('join-code-input').value = '';
     }
 
+    // ゲスト: 部屋に入る
     function joinRoomDirect() {
       myPlayerName = getPlayerName();
       const code = document.getElementById('join-code-input').value.trim();
@@ -843,26 +865,81 @@
       document.getElementById('view-join').style.display = 'none';
       document.getElementById('view-client-waiting').style.display = 'block';
       document.getElementById('client-code-display').innerText = code;
-      document.getElementById('client-net-status').innerText = '🟡 リーダーに接続通知を送信中...';
+
+      const statusEl = document.getElementById('client-net-status');
+      statusEl.className = 'net-status waiting';
+      statusEl.innerText = '🟡 リーダーの部屋を探しています...';
 
       renderMemberList('client-member-list', [
         { id: 1, name: 'リーダー', color: PLAYER_DEFAULTS[0].color },
         { id: 2, name: `${myPlayerName} (あなた)`, color: PLAYER_DEFAULTS[1].color }
       ]);
 
-      setupOnlineConnection(code, () => {
-        // 接続通知を定期的に送信してリーダーに確実に拾わせる
-        let joinTries = 0;
-        const joinInterval = setInterval(() => {
+      // 同一PC用
+      try {
+        if (broadcastChan) broadcastChan.close();
+        broadcastChan = new BroadcastChannel(`motu_chan_${roomCode}`);
+        broadcastChan.onmessage = (e) => handleNetworkMessage(e.data);
+      } catch(e){}
+
+      // WebRTC ゲスト接続
+      if (peer) peer.destroy();
+      peer = new Peer(PEER_CONFIG);
+
+      peer.on('open', () => {
+        connectToHost(code);
+      });
+
+      peer.on('error', (err) => {
+        console.log('Guest peer error:', err);
+      });
+
+      // 同一PC用にも即座に参加通知を送信
+      sendNetMessage({
+        type: 'GUEST_JOIN',
+        clientId: myClientId,
+        name: myPlayerName
+      });
+    }
+
+    function connectToHost(code) {
+      const targetHostId = getHostPeerId(code);
+      const statusEl = document.getElementById('client-net-status');
+
+      guestConnection = peer.connect(targetHostId, { reliable: true });
+
+      guestConnection.on('open', () => {
+        statusEl.className = 'net-status';
+        statusEl.innerText = '🟢 リーダーに接続成功！参加リクエスト送信済';
+
+        // 参加リクエスト送信
+        guestConnection.send({
+          type: 'GUEST_JOIN',
+          clientId: myClientId,
+          name: myPlayerName
+        });
+      });
+
+      guestConnection.on('data', (data) => {
+        handleNetworkMessage(data);
+      });
+
+      guestConnection.on('close', () => {
+        statusEl.className = 'net-status error';
+        statusEl.innerText = '🔴 切断されました';
+      });
+
+      // 3秒経っても繋がらない場合のリトライ
+      setTimeout(() => {
+        if (!guestConnection || !guestConnection.open) {
+          // 同一PCブロードキャストでもう一度送信
           sendNetMessage({
-            type: 'PLAYER_JOIN',
+            type: 'GUEST_JOIN',
             clientId: myClientId,
             name: myPlayerName
           });
-          joinTries++;
-          if (joinTries > 10 || isGameRunning) clearInterval(joinInterval);
-        }, 400);
-      });
+        }
+      }, 3000);
     }
 
     function renderMemberList(containerId, members) {
@@ -891,14 +968,12 @@
     }
 
     function leaveRoom() {
-      if (netWs) netWs.close();
-      if (netHeartbeatTimer) clearInterval(netHeartbeatTimer);
+      if (peer) peer.destroy();
       backToTitle();
     }
 
     function backToTitle() {
-      if (netWs) netWs.close();
-      if (netHeartbeatTimer) clearInterval(netHeartbeatTimer);
+      if (peer) peer.destroy();
       roomCode = '';
       document.getElementById('view-title').style.display = 'flex';
       document.getElementById('view-host').style.display = 'none';
@@ -967,7 +1042,6 @@
             endGame();
           }
 
-          // ホストがゲーム盤面を定期配信
           if (isHost) {
             sendNetMessage({
               type: 'BOARD_SYNC',
@@ -1358,7 +1432,15 @@
         me.x = Math.max(30, Math.min(canvas.width - 30, me.x));
         me.y = Math.max(30, Math.min(canvas.height - 30, me.y));
 
-        if (moved) broadcastMyPlayer();
+        if (moved) {
+          sendNetMessage({
+            type: 'PLAYER_MOVE',
+            id: me.id,
+            x: me.x, y: me.y,
+            direction: me.direction,
+            holding: me.holding
+          });
+        }
       }
 
       for (let i = particles.length - 1; i >= 0; i--) {
