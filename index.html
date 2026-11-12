@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <title>お料理教室 - クッキングシミュレーション</title>
-  <!-- 高速Google STUN対応 PeerJS -->
-  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <!-- 高速リアルタイム通信 (MQTT over WebSocket) -->
+  <script src="https://unpkg.com/mqtt@5.3.5/dist/mqtt.min.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -259,7 +259,7 @@
       background: #2f3542;
       padding: 10px;
       border-radius: 8px;
-      margin: 10px 0;
+      margin: 12px 0;
       text-align: left;
       font-size: 13px;
       display: flex;
@@ -273,16 +273,13 @@
       margin-bottom: 6px;
       font-weight: bold;
       background: #1e272e;
-      padding: 4px 10px;
+      padding: 4px 12px;
       border-radius: 12px;
       display: inline-block;
+      transition: all 0.3s;
     }
-    .net-status.waiting {
-      color: #fbc531;
-    }
-    .net-status.error {
-      color: #ff4757;
-    }
+    .net-status.waiting { color: #fbc531; }
+    .net-status.ready { color: #4cd137; border: 1px solid #4cd137; }
   </style>
 </head>
 <body>
@@ -292,7 +289,7 @@
 
   <div id="guide-banner">
     <div><span class="badge">操作</span> <strong>W, A, S, D</strong> または <strong>矢印キー</strong> で移動 | <strong>Space</strong> でアクション</div>
-    <div style="color: #fbc531;">🌐 別PC・スマホとのオンラインマルチプレイ対応！</div>
+    <div style="color: #fbc531;">🌐 オンライン・マルチプレイ対応！</div>
   </div>
 
   <div id="game-container">
@@ -343,7 +340,7 @@
 
         <!-- 画面2: リーダー部屋作成ロビー -->
         <div id="view-host" class="lobby-box" style="display: none;">
-          <div><span class="net-status waiting" id="host-net-status">🟡 通信準備中...</span></div>
+          <div><span class="net-status ready" id="host-net-status">🟢 待機中 (友達を待っています)</span></div>
           <h3 style="color:#fbc531; font-size: 22px;">👑 ルームを作成しました！</h3>
           <p style="font-size: 13px; color:#dcdde1; margin-top: 4px;">友達にこの<strong>4桁のパスワード</strong>を教えてね：</p>
           <div class="room-code-display" id="host-code-display">----</div>
@@ -368,7 +365,7 @@
 
         <!-- 画面4: 参加者待機ロビー -->
         <div id="view-client-waiting" class="lobby-box" style="display: none;">
-          <div><span class="net-status waiting" id="client-net-status">🟡 リーダーに接続中...</span></div>
+          <div><span class="net-status ready" id="client-net-status">🟢 参加完了！(リーダー待機中)</span></div>
           <h3 style="color:#4cd137; font-size: 22px;">🎉 参加完了！</h3>
           <p style="font-size: 13px; color:#dcdde1; margin-top: 4px;">リーダーがゲームを開始すると自動でスタートします！</p>
           <div class="room-code-display" id="client-code-display">----</div>
@@ -504,25 +501,11 @@
     let timeLeft = 70;
     let timerInterval = null;
 
-    // P2P WebRTC PeerJS接続
-    let peer = null;
-    let hostConnections = [];
-    let guestConnection = null;
-
-    // 同一PC用通信
+    // 通信 (MQTT + BroadcastChannel + LocalStorage)
+    let mqttClient = null;
+    let mqttTopic = '';
     let broadcastChan = null;
-    let localPollInterval = null;
-
-    const PEER_CONFIG = {
-      config: {
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' },
-          { urls: 'stun:stun2.l.google.com:19302' },
-          { urls: 'stun:stun3.l.google.com:19302' }
-        ]
-      }
-    };
+    let syncLoopTimer = null;
 
     const PLAYER_DEFAULTS = [
       { id: 1, name: '1P (青)', color: '#0984e3', startX: 300, startY: 260 },
@@ -605,36 +588,65 @@
     }
 
     /* ========================================================
-       4. ハイブリッド通信層 (WebRTC + LocalStorage/BroadcastChannel)
+       4. 超高速ハイブリッド通信 (HiveMQ WebSocket + Broadcast + LocalStorage)
        ======================================================== */
-    function getHostPeerId(code) {
-      return `motu-kitchen-${code}`;
-    }
+    function initNetwork(code) {
+      roomCode = code;
+      mqttTopic = `motu_kitchen_v3_${code}`;
 
-    function sendNetMessage(msg) {
-      const payload = { ...msg, from: myClientId };
-
-      // 1. WebRTC送信
-      if (isHost) {
-        hostConnections.forEach(c => {
-          if (c && c.open) c.send(payload);
-        });
-      } else if (guestConnection && guestConnection.open) {
-        guestConnection.send(payload);
-      }
-
-      // 2. 同一PC用送信
-      if (broadcastChan) {
-        broadcastChan.postMessage(payload);
-      }
+      // 1. 同一PC用 BroadcastChannel
       try {
-        localStorage.setItem(`motu_shared_msg_${roomCode}`, JSON.stringify({ ...payload, _t: Date.now() }));
+        if (broadcastChan) broadcastChan.close();
+        broadcastChan = new BroadcastChannel(`motu_chan_${code}`);
+        broadcastChan.onmessage = (e) => handleNetworkMessage(e.data);
+      } catch(e){}
+
+      // 2. クラウドMQTT接続 (HiveMQ SSLポート8884)
+      if (mqttClient) mqttClient.end();
+      try {
+        mqttClient = mqtt.connect('wss://broker.hivemq.com:8884/mqtt', {
+          clientId: myClientId,
+          clean: true,
+          connectTimeout: 4000
+        });
+
+        mqttClient.on('connect', () => {
+          console.log('Connected to HiveMQ!');
+          mqttClient.subscribe(mqttTopic);
+        });
+
+        mqttClient.on('message', (topic, payload) => {
+          try {
+            const msg = JSON.parse(payload.toString());
+            if (msg.from !== myClientId) {
+              handleNetworkMessage(msg);
+            }
+          } catch(e){}
+        });
       } catch(e){}
     }
 
-    // 同一PCのLocalStorage監視
+    function sendNetMessage(msg) {
+      const payload = { ...msg, from: myClientId, t: Date.now() };
+
+      // MQTT
+      if (mqttClient && mqttClient.connected) {
+        mqttClient.publish(mqttTopic, JSON.stringify(payload));
+      }
+
+      // BroadcastChannel
+      if (broadcastChan) {
+        broadcastChan.postMessage(payload);
+      }
+
+      // LocalStorage
+      try {
+        localStorage.setItem(`motu_shared_${roomCode}`, JSON.stringify(payload));
+      } catch(e){}
+    }
+
     window.addEventListener('storage', (e) => {
-      if (e.key === `motu_shared_msg_${roomCode}` && e.newValue) {
+      if (e.key === `motu_shared_${roomCode}` && e.newValue) {
         try {
           const msg = JSON.parse(e.newValue);
           if (msg.from !== myClientId) handleNetworkMessage(msg);
@@ -645,9 +657,9 @@
     function handleNetworkMessage(msg) {
       if (!msg) return;
 
-      // 1. リーダーが受ける参加リクエスト
+      // 1. リーダー側
       if (isHost) {
-        if (msg.type === 'GUEST_JOIN') {
+        if (msg.type === 'JOIN_ROOM') {
           let existing = players.find(p => p.clientId === msg.clientId);
           if (!existing && players.length < 3) {
             const newSlot = players.length + 1;
@@ -662,20 +674,19 @@
             });
             renderMemberList('host-member-list', players);
           }
-          // すぐにメンバー一覧をブロードキャスト返信
           broadcastMembers();
         }
       }
 
-      // 2. ゲストが受けるメンバー同期
+      // 2. 参加者側
       if (!isHost) {
         if (msg.type === 'MEMBERS_SYNC') {
-          const myIdx = msg.members.findIndex(m => m.clientId === myClientId);
-          if (myIdx !== -1) {
-            myPlayerId = myIdx + 1;
-            const statusEl = document.getElementById('client-net-status');
-            statusEl.className = 'net-status';
-            statusEl.innerText = '🟢 リーダーに認識されました！(準備完了)';
+          const myIndex = msg.members.findIndex(m => m.clientId === myClientId);
+          if (myIndex !== -1) {
+            myPlayerId = myIndex + 1;
+            const st = document.getElementById('client-net-status');
+            st.className = 'net-status ready';
+            st.innerText = '🟢 リーダーに認識されました！(準備完了)';
           }
           renderMemberList('client-member-list', msg.members);
         }
@@ -688,7 +699,7 @@
         }
       }
 
-      // 3. ゲーム中同期
+      // 3. ゲーム中
       if (isGameRunning) {
         if (msg.type === 'PLAYER_MOVE') {
           const target = players.find(p => p.id === msg.id);
@@ -731,7 +742,7 @@
     }
 
     /* ========================================================
-       5. 画面遷移 & 接続制御
+       5. ロビー・画面遷移
        ======================================================== */
     function startSingleGame() {
       myPlayerName = getPlayerName();
@@ -758,12 +769,11 @@
       updateUI();
     }
 
-    // ホスト: 部屋作成
+    // リーダー: 部屋作成
     function showHostLobby() {
       myPlayerName = getPlayerName();
       isHost = true;
       myPlayerId = 1;
-      hostConnections = [];
 
       roomCode = Math.floor(1000 + Math.random() * 9000).toString();
       document.getElementById('host-code-display').innerText = roomCode;
@@ -779,53 +789,14 @@
       document.getElementById('view-title').style.display = 'none';
       document.getElementById('view-host').style.display = 'block';
 
-      const statusEl = document.getElementById('host-net-status');
-      statusEl.className = 'net-status waiting';
-      statusEl.innerText = '🟡 通信待機サーバーに接続中...';
-
       renderMemberList('host-member-list', players);
+      initNetwork(roomCode);
 
-      // 同一PC用ブロードキャスト
-      try {
-        if (broadcastChan) broadcastChan.close();
-        broadcastChan = new BroadcastChannel(`motu_chan_${roomCode}`);
-        broadcastChan.onmessage = (e) => handleNetworkMessage(e.data);
-      } catch(e){}
-
-      // WebRTC PeerJS ホスト起動
-      const hostId = getHostPeerId(roomCode);
-      if (peer) peer.destroy();
-      peer = new Peer(hostId, PEER_CONFIG);
-
-      peer.on('open', (id) => {
-        statusEl.className = 'net-status';
-        statusEl.innerText = '🟢 オンライン待機中！友達を待っています';
-      });
-
-      peer.on('connection', (conn) => {
-        hostConnections.push(conn);
-        conn.on('open', () => {
-          // 接続されたらメンバー一覧を送る
-          broadcastMembers();
-        });
-        conn.on('data', (data) => {
-          handleNetworkMessage(data);
-        });
-        conn.on('close', () => {
-          hostConnections = hostConnections.filter(c => c !== conn);
-        });
-      });
-
-      peer.on('error', (err) => {
-        console.log('Peer error:', err);
-        if (err.type === 'unavailable-id') {
-          // ID衝突時は再生成
-          showHostLobby();
-        } else {
-          statusEl.className = 'net-status waiting';
-          statusEl.innerText = '🟡 ローカル接続待機中 (合言葉で参加可能)';
-        }
-      });
+      // ホストは定期的にメンバーを配信
+      if (syncLoopTimer) clearInterval(syncLoopTimer);
+      syncLoopTimer = setInterval(() => {
+        if (isHost && !isGameRunning) broadcastMembers();
+      }, 1000);
     }
 
     function hostStartGame() {
@@ -834,12 +805,7 @@
       score = 0;
 
       const memberList = players.map(p => ({ id: p.id, name: p.name, color: p.color }));
-
-      sendNetMessage({
-        type: 'START_GAME',
-        members: memberList
-      });
-
+      sendNetMessage({ type: 'START_GAME', members: memberList });
       initMultiGame(memberList);
     }
 
@@ -850,7 +816,7 @@
       document.getElementById('join-code-input').value = '';
     }
 
-    // ゲスト: 部屋に入る
+    // 参加者: 部屋に入る
     function joinRoomDirect() {
       myPlayerName = getPlayerName();
       const code = document.getElementById('join-code-input').value.trim();
@@ -866,80 +832,26 @@
       document.getElementById('view-client-waiting').style.display = 'block';
       document.getElementById('client-code-display').innerText = code;
 
-      const statusEl = document.getElementById('client-net-status');
-      statusEl.className = 'net-status waiting';
-      statusEl.innerText = '🟡 リーダーの部屋を探しています...';
-
+      // 参加画面表示と同時に仮メンバー表示
       renderMemberList('client-member-list', [
         { id: 1, name: 'リーダー', color: PLAYER_DEFAULTS[0].color },
         { id: 2, name: `${myPlayerName} (あなた)`, color: PLAYER_DEFAULTS[1].color }
       ]);
 
-      // 同一PC用
-      try {
-        if (broadcastChan) broadcastChan.close();
-        broadcastChan = new BroadcastChannel(`motu_chan_${roomCode}`);
-        broadcastChan.onmessage = (e) => handleNetworkMessage(e.data);
-      } catch(e){}
+      initNetwork(code);
 
-      // WebRTC ゲスト接続
-      if (peer) peer.destroy();
-      peer = new Peer(PEER_CONFIG);
-
-      peer.on('open', () => {
-        connectToHost(code);
-      });
-
-      peer.on('error', (err) => {
-        console.log('Guest peer error:', err);
-      });
-
-      // 同一PC用にも即座に参加通知を送信
-      sendNetMessage({
-        type: 'GUEST_JOIN',
-        clientId: myClientId,
-        name: myPlayerName
-      });
-    }
-
-    function connectToHost(code) {
-      const targetHostId = getHostPeerId(code);
-      const statusEl = document.getElementById('client-net-status');
-
-      guestConnection = peer.connect(targetHostId, { reliable: true });
-
-      guestConnection.on('open', () => {
-        statusEl.className = 'net-status';
-        statusEl.innerText = '🟢 リーダーに接続成功！参加リクエスト送信済';
-
-        // 参加リクエスト送信
-        guestConnection.send({
-          type: 'GUEST_JOIN',
+      // 参加メッセージを即座に送信＆定期送信
+      let count = 0;
+      if (syncLoopTimer) clearInterval(syncLoopTimer);
+      syncLoopTimer = setInterval(() => {
+        sendNetMessage({
+          type: 'JOIN_ROOM',
           clientId: myClientId,
           name: myPlayerName
         });
-      });
-
-      guestConnection.on('data', (data) => {
-        handleNetworkMessage(data);
-      });
-
-      guestConnection.on('close', () => {
-        statusEl.className = 'net-status error';
-        statusEl.innerText = '🔴 切断されました';
-      });
-
-      // 3秒経っても繋がらない場合のリトライ
-      setTimeout(() => {
-        if (!guestConnection || !guestConnection.open) {
-          // 同一PCブロードキャストでもう一度送信
-          sendNetMessage({
-            type: 'GUEST_JOIN',
-            clientId: myClientId,
-            name: myPlayerName
-          });
-        }
-      }, 3000);
+        count++;
+        if (count > 15 || isGameRunning) clearInterval(syncLoopTimer);
+      }, 500);
     }
 
     function renderMemberList(containerId, members) {
@@ -968,12 +880,14 @@
     }
 
     function leaveRoom() {
-      if (peer) peer.destroy();
+      if (syncLoopTimer) clearInterval(syncLoopTimer);
+      if (mqttClient) mqttClient.end();
       backToTitle();
     }
 
     function backToTitle() {
-      if (peer) peer.destroy();
+      if (syncLoopTimer) clearInterval(syncLoopTimer);
+      if (mqttClient) mqttClient.end();
       roomCode = '';
       document.getElementById('view-title').style.display = 'flex';
       document.getElementById('view-host').style.display = 'none';
