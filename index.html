@@ -276,7 +276,6 @@
       padding: 4px 12px;
       border-radius: 12px;
       display: inline-block;
-      transition: all 0.3s;
     }
     .net-status.waiting { color: #fbc531; }
     .net-status.ready { color: #4cd137; border: 1px solid #4cd137; }
@@ -289,7 +288,7 @@
 
   <div id="guide-banner">
     <div><span class="badge">操作</span> <strong>W, A, S, D</strong> または <strong>矢印キー</strong> で移動 | <strong>Space</strong> でアクション</div>
-    <div style="color: #fbc531;">🌐 オンライン・マルチプレイ対応！</div>
+    <div style="color: #fbc531;">🌐 全員が自分のシェフを自由に動かせるよ！</div>
   </div>
 
   <div id="game-container">
@@ -492,20 +491,21 @@
     let myPlayerName = 'シェフ1';
     let currentMode = 'single';
     let isHost = true;
-    let myPlayerId = 1;
+    let myPlayerId = 1; // 1:青, 2:赤, 3:緑
     let roomCode = '';
-    let myClientId = 'user_' + Math.random().toString(36).substring(2, 9);
+    let myClientId = 'client_' + Math.random().toString(36).substring(2, 9);
 
     let isGameRunning = false;
     let score = 0;
     let timeLeft = 70;
     let timerInterval = null;
 
-    // 通信 (MQTT + BroadcastChannel + LocalStorage)
+    // 通信オブジェクト
     let mqttClient = null;
     let mqttTopic = '';
     let broadcastChan = null;
     let syncLoopTimer = null;
+    let lastMoveBroadcastTime = 0; // スロットリング用
 
     const PLAYER_DEFAULTS = [
       { id: 1, name: '1P (青)', color: '#0984e3', startX: 300, startY: 260 },
@@ -567,13 +567,7 @@
         const me = players.find(p => p.id === myPlayerId);
         if (me) {
           interact(me);
-          sendNetMessage({
-            type: 'PLAYER_MOVE',
-            id: me.id,
-            x: me.x, y: me.y,
-            direction: me.direction,
-            holding: me.holding
-          });
+          sendPlayerMoveImmediately(me);
         }
       }
     });
@@ -588,30 +582,29 @@
     }
 
     /* ========================================================
-       4. 超高速ハイブリッド通信 (HiveMQ WebSocket + Broadcast + LocalStorage)
+       4. リアルタイム通信 (HiveMQ + LocalStorage)
        ======================================================== */
     function initNetwork(code) {
       roomCode = code;
-      mqttTopic = `motu_kitchen_v3_${code}`;
+      mqttTopic = `motu_kitchen_room_${code}`;
 
-      // 1. 同一PC用 BroadcastChannel
+      // 1. 同一PC用
       try {
         if (broadcastChan) broadcastChan.close();
         broadcastChan = new BroadcastChannel(`motu_chan_${code}`);
         broadcastChan.onmessage = (e) => handleNetworkMessage(e.data);
       } catch(e){}
 
-      // 2. クラウドMQTT接続 (HiveMQ SSLポート8884)
+      // 2. クラウドMQTT
       if (mqttClient) mqttClient.end();
       try {
         mqttClient = mqtt.connect('wss://broker.hivemq.com:8884/mqtt', {
           clientId: myClientId,
           clean: true,
-          connectTimeout: 4000
+          connectTimeout: 5000
         });
 
         mqttClient.on('connect', () => {
-          console.log('Connected to HiveMQ!');
           mqttClient.subscribe(mqttTopic);
         });
 
@@ -629,17 +622,12 @@
     function sendNetMessage(msg) {
       const payload = { ...msg, from: myClientId, t: Date.now() };
 
-      // MQTT
       if (mqttClient && mqttClient.connected) {
         mqttClient.publish(mqttTopic, JSON.stringify(payload));
       }
-
-      // BroadcastChannel
       if (broadcastChan) {
         broadcastChan.postMessage(payload);
       }
-
-      // LocalStorage
       try {
         localStorage.setItem(`motu_shared_${roomCode}`, JSON.stringify(payload));
       } catch(e){}
@@ -670,6 +658,7 @@
               clientId: msg.clientId,
               name: msg.name,
               x: def.startX, y: def.startY,
+              targetX: def.startX, targetY: def.startY,
               radius: 20, speed: 3.8, direction: 'down', holding: null
             });
             renderMemberList('host-member-list', players);
@@ -681,12 +670,13 @@
       // 2. 参加者側
       if (!isHost) {
         if (msg.type === 'MEMBERS_SYNC') {
+          // 自分の clientId から正確なスロットIDを特定！
           const myIndex = msg.members.findIndex(m => m.clientId === myClientId);
           if (myIndex !== -1) {
             myPlayerId = myIndex + 1;
             const st = document.getElementById('client-net-status');
             st.className = 'net-status ready';
-            st.innerText = '🟢 リーダーに認識されました！(準備完了)';
+            st.innerText = `🟢 ${myPlayerId}Pとして認識されました！(準備完了)`;
           }
           renderMemberList('client-member-list', msg.members);
         }
@@ -695,17 +685,19 @@
           currentMode = 'multi';
           timeLeft = 60;
           score = 0;
+          // 自分の clientId を保持したままゲーム開始！
           initMultiGame(msg.members);
         }
       }
 
-      // 3. ゲーム中
+      // 3. ゲーム中の同期 (滑らかな線形補間)
       if (isGameRunning) {
         if (msg.type === 'PLAYER_MOVE') {
           const target = players.find(p => p.id === msg.id);
           if (target && target.id !== myPlayerId) {
-            target.x = msg.x;
-            target.y = msg.y;
+            // スムーズな補間のため targetX/targetY にセット！
+            target.targetX = msg.x;
+            target.targetY = msg.y;
             target.direction = msg.direction;
             target.holding = msg.holding;
           }
@@ -737,8 +729,25 @@
     function broadcastMembers() {
       sendNetMessage({
         type: 'MEMBERS_SYNC',
-        members: players.map(p => ({ id: p.id, clientId: p.clientId, name: p.name, color: p.color }))
+        members: players.map(p => ({
+          id: p.id,
+          clientId: p.clientId,
+          name: p.name,
+          color: p.color
+        }))
       });
+    }
+
+    function sendPlayerMoveImmediately(me) {
+      sendNetMessage({
+        type: 'PLAYER_MOVE',
+        id: me.id,
+        x: me.x,
+        y: me.y,
+        direction: me.direction,
+        holding: me.holding
+      });
+      lastMoveBroadcastTime = Date.now();
     }
 
     /* ========================================================
@@ -761,6 +770,7 @@
         ...PLAYER_DEFAULTS[0],
         name: myPlayerName,
         x: PLAYER_DEFAULTS[0].startX, y: PLAYER_DEFAULTS[0].startY,
+        targetX: PLAYER_DEFAULTS[0].startX, targetY: PLAYER_DEFAULTS[0].startY,
         radius: 20, speed: 3.8, direction: 'down', holding: null
       }];
 
@@ -783,6 +793,7 @@
         clientId: myClientId,
         name: `${myPlayerName} (リーダー)`,
         x: PLAYER_DEFAULTS[0].startX, y: PLAYER_DEFAULTS[0].startY,
+        targetX: PLAYER_DEFAULTS[0].startX, targetY: PLAYER_DEFAULTS[0].startY,
         radius: 20, speed: 3.8, direction: 'down', holding: null
       }];
 
@@ -792,7 +803,6 @@
       renderMemberList('host-member-list', players);
       initNetwork(roomCode);
 
-      // ホストは定期的にメンバーを配信
       if (syncLoopTimer) clearInterval(syncLoopTimer);
       syncLoopTimer = setInterval(() => {
         if (isHost && !isGameRunning) broadcastMembers();
@@ -804,7 +814,14 @@
       timeLeft = 60;
       score = 0;
 
-      const memberList = players.map(p => ({ id: p.id, name: p.name, color: p.color }));
+      // 各自の clientId を保持して確実に送信！
+      const memberList = players.map(p => ({
+        id: p.id,
+        clientId: p.clientId,
+        name: p.name,
+        color: p.color
+      }));
+
       sendNetMessage({ type: 'START_GAME', members: memberList });
       initMultiGame(memberList);
     }
@@ -832,7 +849,6 @@
       document.getElementById('view-client-waiting').style.display = 'block';
       document.getElementById('client-code-display').innerText = code;
 
-      // 参加画面表示と同時に仮メンバー表示
       renderMemberList('client-member-list', [
         { id: 1, name: 'リーダー', color: PLAYER_DEFAULTS[0].color },
         { id: 2, name: `${myPlayerName} (あなた)`, color: PLAYER_DEFAULTS[1].color }
@@ -840,7 +856,7 @@
 
       initNetwork(code);
 
-      // 参加メッセージを即座に送信＆定期送信
+      // 参加通知を連続送信
       let count = 0;
       if (syncLoopTimer) clearInterval(syncLoopTimer);
       syncLoopTimer = setInterval(() => {
@@ -850,7 +866,7 @@
           name: myPlayerName
         });
         count++;
-        if (count > 15 || isGameRunning) clearInterval(syncLoopTimer);
+        if (count > 20 || isGameRunning) clearInterval(syncLoopTimer);
       }, 500);
     }
 
@@ -895,25 +911,34 @@
       document.getElementById('view-client-waiting').style.display = 'none';
     }
 
+    // ゲーム初期化 (確実に自分のスロットを割り当て！)
     function initMultiGame(members) {
       document.getElementById('overlay-screen').style.display = 'none';
       document.getElementById('mode-label').innerText = `👥 マルチ (部屋:${roomCode})`;
+
+      // 参加者の中で自分の clientId を探して myPlayerId を確定！
+      if (!isHost) {
+        const myIndex = members.findIndex(m => m.clientId === myClientId);
+        if (myIndex !== -1) {
+          myPlayerId = myIndex + 1;
+        }
+      } else {
+        myPlayerId = 1;
+      }
 
       players = members.map((m, idx) => {
         const def = PLAYER_DEFAULTS[idx];
         return {
           ...def,
           id: idx + 1,
+          clientId: m.clientId,
           name: m.name,
           color: m.color || def.color,
           x: def.startX, y: def.startY,
+          targetX: def.startX, targetY: def.startY, // 補間用目標座標
           radius: 20, speed: 3.8, direction: 'down', holding: null
         };
       });
-
-      if (!players.find(p => p.id === myPlayerId)) {
-        myPlayerId = 1;
-      }
 
       resetStationsAndOrders();
       isGameRunning = true;
@@ -1330,7 +1355,7 @@
     }
 
     /* ========================================================
-       8. ループ & レンダリング
+       8. ループ & レンダリング (ヌルヌル動く滑らかな線形補間)
        ======================================================== */
     function update() {
       if (!isGameRunning) return;
@@ -1346,16 +1371,24 @@
         me.x = Math.max(30, Math.min(canvas.width - 30, me.x));
         me.y = Math.max(30, Math.min(canvas.height - 30, me.y));
 
-        if (moved) {
-          sendNetMessage({
-            type: 'PLAYER_MOVE',
-            id: me.id,
-            x: me.x, y: me.y,
-            direction: me.direction,
-            holding: me.holding
-          });
+        // 50ms（毎秒20回）にスロットリングして送信（パケット詰まりを防止！）
+        const now = Date.now();
+        if (moved && now - lastMoveBroadcastTime > 50) {
+          sendPlayerMoveImmediately(me);
         }
       }
+
+      // 他プレイヤーの位置を滑らかに線形補間 (Lerp) で移動させる
+      players.forEach(p => {
+        if (p.id !== myPlayerId) {
+          if (p.targetX !== undefined) {
+            p.x += (p.targetX - p.x) * 0.28; // 滑らかに追従
+          }
+          if (p.targetY !== undefined) {
+            p.y += (p.targetY - p.y) * 0.28; // 滑らかに追従
+          }
+        }
+      });
 
       for (let i = particles.length - 1; i >= 0; i--) {
         const pt = particles[i];
