@@ -3,8 +3,6 @@
 <head>
   <meta charset="UTF-8">
   <title>お料理教室 - クッキングシミュレーション</title>
-  <!-- 世界中・別PC・スマホ間で瞬時に繋がる無料リアルタイム通信ライブラリ (MQTT over WebSocket) -->
-  <script src="https://unpkg.com/mqtt@5.3.5/dist/mqtt.min.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -268,9 +266,10 @@
       min-height: 80px;
     }
     .net-status {
-      font-size: 11px;
+      font-size: 12px;
       color: #4cd137;
       margin-bottom: 4px;
+      font-weight: bold;
     }
   </style>
 </head>
@@ -281,7 +280,7 @@
 
   <div id="guide-banner">
     <div><span class="badge">操作</span> <strong>W, A, S, D</strong> または <strong>矢印キー</strong> で移動 | <strong>Space</strong> でアクション</div>
-    <div style="color: #fbc531;">🌐 別PC・スマホとのオンライン合流対応！</div>
+    <div style="color: #fbc531;">🌐 別PC・スマホとのオンラインマルチプレイ対応！</div>
   </div>
 
   <div id="game-container">
@@ -332,7 +331,7 @@
 
         <!-- 画面2: リーダー部屋作成ロビー -->
         <div id="view-host" class="lobby-box" style="display: none;">
-          <div class="net-status" id="host-net-status">🌐 オンライン接続中...</div>
+          <div class="net-status" id="host-net-status">🟢 オンライン通信サーバー接続中...</div>
           <h3 style="color:#fbc531; font-size: 22px;">👑 ルームを作成しました！</h3>
           <p style="font-size: 13px; color:#dcdde1; margin-top: 4px;">友達にこの<strong>4桁のパスワード</strong>を教えてね：</p>
           <div class="room-code-display" id="host-code-display">----</div>
@@ -357,7 +356,7 @@
 
         <!-- 画面4: 参加者待機ロビー -->
         <div id="view-client-waiting" class="lobby-box" style="display: none;">
-          <div class="net-status" id="client-net-status">🌐 オンライン接続完了</div>
+          <div class="net-status" id="client-net-status">🟢 部屋に接続中...</div>
           <h3 style="color:#4cd137; font-size: 22px;">🎉 参加完了！</h3>
           <p style="font-size: 13px; color:#dcdde1; margin-top: 6px;">リーダーがゲームを開始すると自動でスタートします！</p>
           <div class="room-code-display" id="client-code-display">----</div>
@@ -486,16 +485,17 @@
     let isHost = true;
     let myPlayerId = 1;
     let roomCode = '';
-    let myClientId = 'client_' + Math.random().toString(36).substring(2, 9);
+    let myClientId = 'user_' + Math.random().toString(36).substring(2, 9);
 
     let isGameRunning = false;
     let score = 0;
     let timeLeft = 70;
     let timerInterval = null;
 
-    // MQTTクライアント (インターネット超安定通信)
-    let mqttClient = null;
-    let mqttTopic = '';
+    // 通信オブジェクト (標準WebSocket ポート443)
+    let netWs = null;
+    let netHeartbeatTimer = null;
+    let broadcastChan = null;
 
     const PLAYER_DEFAULTS = [
       { id: 1, name: '1P (青)', color: '#0984e3', startX: 300, startY: 260 },
@@ -573,69 +573,82 @@
     }
 
     /* ========================================================
-       4. インターネット経由MQTT通信 (登録不要・無料・確実)
+       4. 超安定オンライン通信 (ntfy.sh ポート443 WebSocket + LocalStorage)
        ======================================================== */
-    function connectMQTT(code, onReady) {
-      if (mqttClient) {
-        mqttClient.end();
-      }
+    function getTopicUrl(code) {
+      return `motu_cook_${code}`;
+    }
+
+    function setupOnlineConnection(code, onOpen) {
       roomCode = code;
-      mqttTopic = `motu_cooking_class/${code}`;
+      const topic = getTopicUrl(code);
 
-      // 無料で使える世界規模のセキュアWebSocket MQTTブローカー
-      // (HiveMQ / EMQX のセキュアポート)
-      mqttClient = mqtt.connect('wss://broker.emqx.io:8084/mqtt', {
-        clientId: myClientId,
-        clean: true,
-        connectTimeout: 5000,
-        reconnectPeriod: 2000
-      });
+      // 1. 同一PC用 BroadcastChannel
+      try {
+        if (broadcastChan) broadcastChan.close();
+        broadcastChan = new BroadcastChannel(`motu_chan_${code}`);
+        broadcastChan.onmessage = (e) => handleNetworkMessage(e.data);
+      } catch(e){}
 
-      mqttClient.on('connect', () => {
-        console.log('Connected to MQTT Broker!');
-        mqttClient.subscribe(mqttTopic, { qos: 0 });
-        if (onReady) onReady();
-      });
+      // 2. クラウドWebSocket (標準ポート443で絶対にブロックされない)
+      if (netWs) netWs.close();
+      netWs = new WebSocket(`wss://ntfy.sh/${topic}/ws`);
 
-      mqttClient.on('message', (topic, payload) => {
+      netWs.onopen = () => {
+        console.log('Online WebSocket connected successfully!');
+        if (onOpen) onOpen();
+      };
+
+      netWs.onmessage = (event) => {
         try {
-          const msg = JSON.parse(payload.toString());
-          if (msg.from !== myClientId) {
-            handleNetworkMessage(msg);
+          const envelope = JSON.parse(event.data);
+          if (envelope.event === 'message') {
+            const msg = JSON.parse(envelope.message);
+            if (msg.from !== myClientId) {
+              handleNetworkMessage(msg);
+            }
           }
         } catch(e){}
-      });
+      };
 
-      mqttClient.on('error', (err) => {
-        console.log('MQTT error:', err);
-      });
+      netWs.onerror = (err) => console.log('WS error:', err);
     }
 
     function sendNetMessage(msg) {
-      if (mqttClient && mqttClient.connected) {
-        mqttClient.publish(mqttTopic, JSON.stringify({ ...msg, from: myClientId }));
+      if (!roomCode) return;
+      const payload = { ...msg, from: myClientId, time: Date.now() };
+      const topic = getTopicUrl(roomCode);
+
+      // A. クラウドPOST送信
+      fetch(`https://ntfy.sh/${topic}`, {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      }).catch(e => console.log('Fetch send error:', e));
+
+      // B. 同一PC内ブロードキャスト
+      if (broadcastChan) {
+        broadcastChan.postMessage(payload);
       }
-      // 同一PCの別ウィンドウ用にもLocalStorageに流す
       try {
-        localStorage.setItem(`iwamoto_net_${roomCode}`, JSON.stringify({ ...msg, from: myClientId, _t: Date.now() }));
+        localStorage.setItem(`motu_ls_${roomCode}`, JSON.stringify(payload));
       } catch(e){}
     }
 
-    // LocalStorageイベントも監視 (同一PC内でのバックアップ)
+    // LocalStorageバックアップ
     window.addEventListener('storage', (e) => {
-      if (e.key === `iwamoto_net_${roomCode}` && e.newValue) {
+      if (e.key === `motu_ls_${roomCode}` && e.newValue) {
         try {
           const msg = JSON.parse(e.newValue);
-          if (msg.from !== myClientId) {
-            handleNetworkMessage(msg);
-          }
+          if (msg.from !== myClientId) handleNetworkMessage(msg);
         } catch(err){}
       }
     });
 
-    // ネットワークメッセージ受信処理
+    // ネットワークメッセージ処理
     function handleNetworkMessage(msg) {
-      // 1. リーダー側が受け取る参加メッセージ
+      if (!msg) return;
+
+      // 1. ホスト側が受ける参加通知
       if (isHost) {
         if (msg.type === 'PLAYER_JOIN') {
           let existing = players.find(p => p.clientId === msg.clientId);
@@ -652,18 +665,18 @@
             });
             renderMemberList('host-member-list', players);
           }
-          // 全員に現在のメンバー情報を同期
+          // すぐに全員へ最新メンバー一覧をブロードキャスト返信！
           broadcastMembers();
         }
       }
 
-      // 2. 参加者側が受け取るメンバー更新
+      // 2. ゲスト側が受けるメンバー一覧同期
       if (!isHost) {
         if (msg.type === 'MEMBERS_SYNC') {
-          // 自分のスロット番号を特定
-          const mySlot = msg.members.findIndex(m => m.clientId === myClientId);
-          if (mySlot !== -1) {
-            myPlayerId = mySlot + 1;
+          const myIndex = msg.members.findIndex(m => m.clientId === myClientId);
+          if (myIndex !== -1) {
+            myPlayerId = myIndex + 1;
+            document.getElementById('client-net-status').innerText = '🟢 リーダーに認識されました！(準備完了)';
           }
           renderMemberList('client-member-list', msg.members);
         }
@@ -676,7 +689,7 @@
         }
       }
 
-      // 3. ゲーム中同期
+      // 3. ゲームプレイ中の同期
       if (isGameRunning) {
         if (msg.type === 'PLAYER_MOVE') {
           const target = players.find(p => p.id === msg.id);
@@ -779,16 +792,17 @@
 
       document.getElementById('view-title').style.display = 'none';
       document.getElementById('view-host').style.display = 'block';
-      document.getElementById('host-net-status').innerText = '🌐 オンライン接続中...';
+      document.getElementById('host-net-status').innerText = '🟢 オンライン待機サーバー接続中...';
 
       renderMemberList('host-member-list', players);
 
-      connectMQTT(roomCode, () => {
-        document.getElementById('host-net-status').innerText = '✅ オンライン準備完了！参加者を待機中';
-        // 定期的にメンバー情報を配信
-        setInterval(() => {
+      setupOnlineConnection(roomCode, () => {
+        document.getElementById('host-net-status').innerText = '🟢 オンライン接続完了！参加者を待機中';
+        // ホストから定期的にハートビート配信
+        if (netHeartbeatTimer) clearInterval(netHeartbeatTimer);
+        netHeartbeatTimer = setInterval(() => {
           if (isHost && !isGameRunning) broadcastMembers();
-        }, 1000);
+        }, 1500);
       });
     }
 
@@ -829,26 +843,25 @@
       document.getElementById('view-join').style.display = 'none';
       document.getElementById('view-client-waiting').style.display = 'block';
       document.getElementById('client-code-display').innerText = code;
-      document.getElementById('client-net-status').innerText = '🌐 部屋に接続中...';
+      document.getElementById('client-net-status').innerText = '🟡 リーダーに接続通知を送信中...';
 
       renderMemberList('client-member-list', [
         { id: 1, name: 'リーダー', color: PLAYER_DEFAULTS[0].color },
         { id: 2, name: `${myPlayerName} (あなた)`, color: PLAYER_DEFAULTS[1].color }
       ]);
 
-      connectMQTT(code, () => {
-        document.getElementById('client-net-status').innerText = '✅ 部屋に参加しました！';
-        // 参加通知を送信 (確実に届くよう数回送信)
-        let count = 0;
+      setupOnlineConnection(code, () => {
+        // 接続通知を定期的に送信してリーダーに確実に拾わせる
+        let joinTries = 0;
         const joinInterval = setInterval(() => {
           sendNetMessage({
             type: 'PLAYER_JOIN',
             clientId: myClientId,
             name: myPlayerName
           });
-          count++;
-          if (count > 5 || isGameRunning) clearInterval(joinInterval);
-        }, 300);
+          joinTries++;
+          if (joinTries > 10 || isGameRunning) clearInterval(joinInterval);
+        }, 400);
       });
     }
 
@@ -878,12 +891,14 @@
     }
 
     function leaveRoom() {
-      if (mqttClient) mqttClient.end();
+      if (netWs) netWs.close();
+      if (netHeartbeatTimer) clearInterval(netHeartbeatTimer);
       backToTitle();
     }
 
     function backToTitle() {
-      if (mqttClient) mqttClient.end();
+      if (netWs) netWs.close();
+      if (netHeartbeatTimer) clearInterval(netHeartbeatTimer);
       roomCode = '';
       document.getElementById('view-title').style.display = 'flex';
       document.getElementById('view-host').style.display = 'none';
