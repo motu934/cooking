@@ -832,6 +832,31 @@
     }
 
     function hostStartGame() {
+  // Hide all lobby UI before starting the game
+  document.getElementById('view-host').style.display = 'none';
+  document.getElementById('view-join').style.display = 'none';
+  document.getElementById('view-client-waiting').style.display = 'none';
+  document.getElementById('overlay-screen').style.display = 'none';
+
+  currentMode = 'multi';
+  timeLeft = 60;
+  score = 0;
+
+  // Ensure the host member list stays visible during the game
+  const hostListEl = document.getElementById('host-member-list');
+  if (hostListEl) hostListEl.style.display = 'block';
+
+  // 各自の clientId を保持して確実に送信！
+  const memberList = players.map(p => ({
+    id: p.id,
+    clientId: p.clientId,
+    name: p.name,
+    color: p.color
+  }));
+
+  sendNetMessage({ type: 'START_GAME', members: memberList });
+  initMultiGame(memberList);
+}
       currentMode = 'multi';
       timeLeft = 60;
       score = 0;
