@@ -704,6 +704,22 @@
         }
 
         if (msg.type === 'BOARD_SYNC' && !isHost) {
+          // 受信側でもタイマーが0以下になったらゲーム終了
+          if (msg.timeLeft <= 0 && isGameRunning) {
+            isGameRunning = false;
+            endGame();
+          }
+          score = msg.score;
+          timeLeft = msg.timeLeft;
+          orders = msg.orders;
+          msg.stations.forEach((st, idx) => {
+            if (stations[idx]) {
+              stations[idx].item = st.item;
+              stations[idx].progress = st.progress;
+              stations[idx].chopAnim = st.chopAnim;
+            }
+          });
+          updateUI();
           score = msg.score;
           timeLeft = msg.timeLeft;
           orders = msg.orders;
