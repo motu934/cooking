@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <title>お料理教室 - クッキングシミュレーション</title>
-  <!-- インターネット越しに別のPC/スマホと直接通信する無料ライブラリ (PeerJS) -->
-  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <!-- 世界中・別PC・スマホ間で瞬時に繋がる無料リアルタイム通信ライブラリ (MQTT over WebSocket) -->
+  <script src="https://unpkg.com/mqtt@5.3.5/dist/mqtt.min.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -267,6 +267,11 @@
       gap: 6px;
       min-height: 80px;
     }
+    .net-status {
+      font-size: 11px;
+      color: #4cd137;
+      margin-bottom: 4px;
+    }
   </style>
 </head>
 <body>
@@ -276,7 +281,7 @@
 
   <div id="guide-banner">
     <div><span class="badge">操作</span> <strong>W, A, S, D</strong> または <strong>矢印キー</strong> で移動 | <strong>Space</strong> でアクション</div>
-    <div style="color: #fbc531;">🌐 インターネット・別PC・スマホでの合流に対応！</div>
+    <div style="color: #fbc531;">🌐 別PC・スマホとのオンライン合流対応！</div>
   </div>
 
   <div id="game-container">
@@ -313,7 +318,7 @@
             <div class="mode-card">
               <h3>👥 マルチモード</h3>
               <p>
-                別PCやスマホの友達とも遊べる！<br>
+                離れた友達のPCやスマホとも遊べる！<br>
                 役割の制限なし！誰でも何でもOK！<br>
                 <strong>初期タイム: 60秒</strong><br>
                 🥗 サラダ: <span style="color:#2ed573;">+5秒</span><br>
@@ -327,6 +332,7 @@
 
         <!-- 画面2: リーダー部屋作成ロビー -->
         <div id="view-host" class="lobby-box" style="display: none;">
+          <div class="net-status" id="host-net-status">🌐 オンライン接続中...</div>
           <h3 style="color:#fbc531; font-size: 22px;">👑 ルームを作成しました！</h3>
           <p style="font-size: 13px; color:#dcdde1; margin-top: 4px;">友達にこの<strong>4桁のパスワード</strong>を教えてね：</p>
           <div class="room-code-display" id="host-code-display">----</div>
@@ -349,9 +355,10 @@
           <button class="btn-secondary" style="background:#57606f; margin-top: 8px;" onclick="backToTitle()">戻る</button>
         </div>
 
-        <!-- 画面4: 参加者待機ロビー (直接合流) -->
+        <!-- 画面4: 参加者待機ロビー -->
         <div id="view-client-waiting" class="lobby-box" style="display: none;">
-          <h3 style="color:#4cd137; font-size: 22px;">🎉 参加しました！</h3>
+          <div class="net-status" id="client-net-status">🌐 オンライン接続完了</div>
+          <h3 style="color:#4cd137; font-size: 22px;">🎉 参加完了！</h3>
           <p style="font-size: 13px; color:#dcdde1; margin-top: 6px;">リーダーがゲームを開始すると自動でスタートします！</p>
           <div class="room-code-display" id="client-code-display">----</div>
           
@@ -486,11 +493,9 @@
     let timeLeft = 70;
     let timerInterval = null;
 
-    // WebRTC PeerJS接続
-    let peer = null;
-    let hostConnections = []; // ホスト側が持つ全クライアントのコネクション
-    let clientConnection = null; // ゲスト側が持つホストへのコネクション
-    let syncInterval = null;
+    // MQTTクライアント (インターネット超安定通信)
+    let mqttClient = null;
+    let mqttTopic = '';
 
     const PLAYER_DEFAULTS = [
       { id: 1, name: '1P (青)', color: '#0984e3', startX: 300, startY: 260 },
@@ -568,17 +573,168 @@
     }
 
     /* ========================================================
-       4. インターネット対応・P2P WebRTC & LocalStorage 通信
+       4. インターネット経由MQTT通信 (登録不要・無料・確実)
        ======================================================== */
-    function getPeerRoomId(code) {
-      return `motu_cook_room_${code}`;
+    function connectMQTT(code, onReady) {
+      if (mqttClient) {
+        mqttClient.end();
+      }
+      roomCode = code;
+      mqttTopic = `motu_cooking_class/${code}`;
+
+      // 無料で使える世界規模のセキュアWebSocket MQTTブローカー
+      // (HiveMQ / EMQX のセキュアポート)
+      mqttClient = mqtt.connect('wss://broker.emqx.io:8084/mqtt', {
+        clientId: myClientId,
+        clean: true,
+        connectTimeout: 5000,
+        reconnectPeriod: 2000
+      });
+
+      mqttClient.on('connect', () => {
+        console.log('Connected to MQTT Broker!');
+        mqttClient.subscribe(mqttTopic, { qos: 0 });
+        if (onReady) onReady();
+      });
+
+      mqttClient.on('message', (topic, payload) => {
+        try {
+          const msg = JSON.parse(payload.toString());
+          if (msg.from !== myClientId) {
+            handleNetworkMessage(msg);
+          }
+        } catch(e){}
+      });
+
+      mqttClient.on('error', (err) => {
+        console.log('MQTT error:', err);
+      });
     }
 
-    function getRoomStorageKey(code) {
-      return `iwamoto_direct_room_${code}`;
+    function sendNetMessage(msg) {
+      if (mqttClient && mqttClient.connected) {
+        mqttClient.publish(mqttTopic, JSON.stringify({ ...msg, from: myClientId }));
+      }
+      // 同一PCの別ウィンドウ用にもLocalStorageに流す
+      try {
+        localStorage.setItem(`iwamoto_net_${roomCode}`, JSON.stringify({ ...msg, from: myClientId, _t: Date.now() }));
+      } catch(e){}
     }
 
-    // 1. シングルモード
+    // LocalStorageイベントも監視 (同一PC内でのバックアップ)
+    window.addEventListener('storage', (e) => {
+      if (e.key === `iwamoto_net_${roomCode}` && e.newValue) {
+        try {
+          const msg = JSON.parse(e.newValue);
+          if (msg.from !== myClientId) {
+            handleNetworkMessage(msg);
+          }
+        } catch(err){}
+      }
+    });
+
+    // ネットワークメッセージ受信処理
+    function handleNetworkMessage(msg) {
+      // 1. リーダー側が受け取る参加メッセージ
+      if (isHost) {
+        if (msg.type === 'PLAYER_JOIN') {
+          let existing = players.find(p => p.clientId === msg.clientId);
+          if (!existing && players.length < 3) {
+            const newSlot = players.length + 1;
+            const def = PLAYER_DEFAULTS[newSlot - 1];
+            players.push({
+              ...def,
+              id: newSlot,
+              clientId: msg.clientId,
+              name: msg.name,
+              x: def.startX, y: def.startY,
+              radius: 20, speed: 3.8, direction: 'down', holding: null
+            });
+            renderMemberList('host-member-list', players);
+          }
+          // 全員に現在のメンバー情報を同期
+          broadcastMembers();
+        }
+      }
+
+      // 2. 参加者側が受け取るメンバー更新
+      if (!isHost) {
+        if (msg.type === 'MEMBERS_SYNC') {
+          // 自分のスロット番号を特定
+          const mySlot = msg.members.findIndex(m => m.clientId === myClientId);
+          if (mySlot !== -1) {
+            myPlayerId = mySlot + 1;
+          }
+          renderMemberList('client-member-list', msg.members);
+        }
+
+        if (msg.type === 'START_GAME') {
+          currentMode = 'multi';
+          timeLeft = 60;
+          score = 0;
+          initMultiGame(msg.members);
+        }
+      }
+
+      // 3. ゲーム中同期
+      if (isGameRunning) {
+        if (msg.type === 'PLAYER_MOVE') {
+          const target = players.find(p => p.id === msg.id);
+          if (target && target.id !== myPlayerId) {
+            target.x = msg.x;
+            target.y = msg.y;
+            target.direction = msg.direction;
+            target.holding = msg.holding;
+          }
+        }
+
+        if (msg.type === 'BOARD_SYNC' && !isHost) {
+          score = msg.score;
+          timeLeft = msg.timeLeft;
+          orders = msg.orders;
+          msg.stations.forEach((st, idx) => {
+            if (stations[idx]) {
+              stations[idx].item = st.item;
+              stations[idx].progress = st.progress;
+              stations[idx].chopAnim = st.chopAnim;
+            }
+          });
+          updateUI();
+        }
+
+        if (msg.type === 'EFFECT') {
+          spawnParticles(msg.x, msg.y, msg.color, msg.count);
+        }
+        if (msg.type === 'TEXT') {
+          addFloatingText(msg.x, msg.y, msg.text, msg.color);
+        }
+      }
+    }
+
+    function broadcastMembers() {
+      sendNetMessage({
+        type: 'MEMBERS_SYNC',
+        members: players.map(p => ({ id: p.id, clientId: p.clientId, name: p.name, color: p.color }))
+      });
+    }
+
+    function broadcastMyPlayer() {
+      const me = players.find(p => p.id === myPlayerId);
+      if (!me) return;
+      sendNetMessage({
+        type: 'PLAYER_MOVE',
+        id: me.id,
+        x: me.x,
+        y: me.y,
+        direction: me.direction,
+        holding: me.holding
+      });
+    }
+
+    /* ========================================================
+       5. 画面遷移 & ロビー制御
+       ======================================================== */
+    // 1. シングル
     function startSingleGame() {
       myPlayerName = getPlayerName();
       currentMode = 'single';
@@ -604,12 +760,11 @@
       updateUI();
     }
 
-    // 2. リーダー: 部屋作成
+    // 2. ホスト: 部屋作成
     function showHostLobby() {
       myPlayerName = getPlayerName();
       isHost = true;
       myPlayerId = 1;
-      hostConnections = [];
 
       roomCode = Math.floor(1000 + Math.random() * 9000).toString();
       document.getElementById('host-code-display').innerText = roomCode;
@@ -624,142 +779,17 @@
 
       document.getElementById('view-title').style.display = 'none';
       document.getElementById('view-host').style.display = 'block';
+      document.getElementById('host-net-status').innerText = '🌐 オンライン接続中...';
 
       renderMemberList('host-member-list', players);
 
-      // LocalStorageに初期登録 (同一PC用)
-      const initialData = {
-        code: roomCode,
-        isGameRunning: false,
-        members: players.map(p => ({ id: p.id, clientId: p.clientId, name: p.name, color: p.color }))
-      };
-      localStorage.setItem(getRoomStorageKey(roomCode), JSON.stringify(initialData));
-
-      // PeerJSでインターネット越しの参加者を待機
-      try {
-        if (peer) peer.destroy();
-        peer = new Peer(getPeerRoomId(roomCode));
-
-        peer.on('open', (id) => {
-          console.log('PeerJS Host ready:', id);
-        });
-
-        peer.on('connection', (conn) => {
-          hostConnections.push(conn);
-
-          conn.on('data', (data) => {
-            handleHostIncomingData(conn, data);
-          });
-
-          conn.on('close', () => {
-            hostConnections = hostConnections.filter(c => c !== conn);
-          });
-        });
-
-        peer.on('error', (err) => {
-          console.log('PeerJS error (falling back to LocalStorage):', err);
-        });
-      } catch(e) {
-        console.log('PeerJS not available:', e);
-      }
-
-      // 同一PCのLocalStorage監視
-      startHostPolling();
-    }
-
-    function handleHostIncomingData(conn, data) {
-      if (data.type === 'DIRECT_JOIN') {
-        if (players.length < 3) {
-          const newSlot = players.length + 1;
-          const def = PLAYER_DEFAULTS[newSlot - 1];
-          const newMember = {
-            ...def,
-            id: newSlot,
-            clientId: data.clientId,
-            name: data.name,
-            x: def.startX, y: def.startY,
-            radius: 20, speed: 3.8, direction: 'down', holding: null
-          };
-          players.push(newMember);
-
-          renderMemberList('host-member-list', players);
-
-          // 参加者に合流成功メッセージ送信
-          conn.send({
-            type: 'JOINED_SUCCESS',
-            slot: newSlot,
-            members: players.map(p => ({ id: p.id, name: p.name, color: p.color }))
-          });
-
-          // 全クライアントにメンバー更新配信
-          broadcastToClients({
-            type: 'MEMBERS_UPDATE',
-            members: players.map(p => ({ id: p.id, name: p.name, color: p.color }))
-          });
-        }
-      } else if (data.type === 'PLAYER_UPDATE') {
-        const target = players.find(p => p.id === data.id);
-        if (target) {
-          target.x = data.x;
-          target.y = data.y;
-          target.direction = data.direction;
-          target.holding = data.holding;
-        }
-        // 他のゲストにも中継
-        broadcastToClients(data, conn);
-      }
-    }
-
-    function broadcastToClients(msg, excludeConn = null) {
-      hostConnections.forEach(c => {
-        if (c !== excludeConn && c.open) {
-          c.send(msg);
-        }
+      connectMQTT(roomCode, () => {
+        document.getElementById('host-net-status').innerText = '✅ オンライン準備完了！参加者を待機中';
+        // 定期的にメンバー情報を配信
+        setInterval(() => {
+          if (isHost && !isGameRunning) broadcastMembers();
+        }, 1000);
       });
-      // 同一PC用にも保存
-      try {
-        localStorage.setItem(getRoomStorageKey(roomCode) + '_net', JSON.stringify({ ...msg, _t: Date.now() }));
-      } catch(e){}
-    }
-
-    function startHostPolling() {
-      if (syncInterval) clearInterval(syncInterval);
-      syncInterval = setInterval(() => {
-        if (!roomCode) return;
-
-        // 同一PCのLocalStorageからの参加も拾う
-        const raw = localStorage.getItem(getRoomStorageKey(roomCode));
-        if (raw) {
-          try {
-            const room = JSON.parse(raw);
-            if (!isGameRunning && room.members && room.members.length > players.length) {
-              room.members.forEach(m => {
-                if (!players.find(p => p.id === m.id)) {
-                  const def = PLAYER_DEFAULTS[m.id - 1];
-                  players.push({
-                    ...def,
-                    id: m.id, name: m.name, color: m.color,
-                    x: def.startX, y: def.startY,
-                    radius: 20, speed: 3.8, direction: 'down', holding: null
-                  });
-                }
-              });
-              renderMemberList('host-member-list', players);
-            }
-          } catch(e){}
-        }
-
-        // ゲーム中の盤面状態配信
-        if (isGameRunning) {
-          broadcastToClients({
-            type: 'GAME_SYNC',
-            score,
-            timeLeft,
-            orders,
-            stations: stations.map(s => ({ item: s.item, progress: s.progress, chopAnim: s.chopAnim }))
-          });
-        }
-      }, 50);
     }
 
     function hostStartGame() {
@@ -769,20 +799,10 @@
 
       const memberList = players.map(p => ({ id: p.id, name: p.name, color: p.color }));
 
-      // 全員にゲーム開始合図
-      broadcastToClients({
-        type: 'GAME_START',
+      sendNetMessage({
+        type: 'START_GAME',
         members: memberList
       });
-
-      // 同一PCのLocalStorage更新
-      const raw = localStorage.getItem(getRoomStorageKey(roomCode));
-      if (raw) {
-        const room = JSON.parse(raw);
-        room.isGameRunning = true;
-        room.members = memberList;
-        localStorage.setItem(getRoomStorageKey(roomCode), JSON.stringify(room));
-      }
 
       initMultiGame(memberList);
     }
@@ -809,130 +829,27 @@
       document.getElementById('view-join').style.display = 'none';
       document.getElementById('view-client-waiting').style.display = 'block';
       document.getElementById('client-code-display').innerText = code;
+      document.getElementById('client-net-status').innerText = '🌐 部屋に接続中...';
 
       renderMemberList('client-member-list', [
         { id: 1, name: 'リーダー', color: PLAYER_DEFAULTS[0].color },
         { id: 2, name: `${myPlayerName} (あなた)`, color: PLAYER_DEFAULTS[1].color }
       ]);
 
-      // 1. 同一PCのLocalStorage参加
-      const raw = localStorage.getItem(getRoomStorageKey(code));
-      if (raw) {
-        try {
-          const room = JSON.parse(raw);
-          let me = room.members.find(m => m.clientId === myClientId);
-          if (!me) {
-            myPlayerId = room.members.length + 1;
-            const def = PLAYER_DEFAULTS[myPlayerId - 1];
-            me = { id: myPlayerId, clientId: myClientId, name: myPlayerName, color: def.color };
-            room.members.push(me);
-            localStorage.setItem(getRoomStorageKey(code), JSON.stringify(room));
-          } else {
-            myPlayerId = me.id;
-          }
-        } catch(e){}
-      }
-
-      // 2. インターネット越しのPeerJS接続
-      try {
-        if (peer) peer.destroy();
-        peer = new Peer();
-
-        peer.on('open', () => {
-          clientConnection = peer.connect(getPeerRoomId(code));
-
-          clientConnection.on('open', () => {
-            console.log('Connected to host via PeerJS!');
-            clientConnection.send({
-              type: 'DIRECT_JOIN',
-              clientId: myClientId,
-              name: myPlayerName
-            });
+      connectMQTT(code, () => {
+        document.getElementById('client-net-status').innerText = '✅ 部屋に参加しました！';
+        // 参加通知を送信 (確実に届くよう数回送信)
+        let count = 0;
+        const joinInterval = setInterval(() => {
+          sendNetMessage({
+            type: 'PLAYER_JOIN',
+            clientId: myClientId,
+            name: myPlayerName
           });
-
-          clientConnection.on('data', (data) => {
-            handleClientIncomingData(data);
-          });
-        });
-      } catch(e){}
-
-      // クライアント監視
-      startClientPolling();
-    }
-
-    function handleClientIncomingData(data) {
-      if (data.type === 'JOINED_SUCCESS') {
-        myPlayerId = data.slot;
-        renderMemberList('client-member-list', data.members);
-      } else if (data.type === 'MEMBERS_UPDATE') {
-        renderMemberList('client-member-list', data.members);
-      } else if (data.type === 'GAME_START') {
-        currentMode = 'multi';
-        timeLeft = 60;
-        score = 0;
-        initMultiGame(data.members);
-      } else if (data.type === 'GAME_SYNC') {
-        score = data.score;
-        timeLeft = data.timeLeft;
-        orders = data.orders;
-        data.stations.forEach((st, idx) => {
-          if (stations[idx]) {
-            stations[idx].item = st.item;
-            stations[idx].progress = st.progress;
-            stations[idx].chopAnim = st.chopAnim;
-          }
-        });
-        updateUI();
-      } else if (data.type === 'PLAYER_UPDATE') {
-        const target = players.find(p => p.id === data.id);
-        if (target && target.id !== myPlayerId) {
-          target.x = data.x;
-          target.y = data.y;
-          target.direction = data.direction;
-          target.holding = data.holding;
-        }
-      }
-    }
-
-    function startClientPolling() {
-      if (syncInterval) clearInterval(syncInterval);
-      syncInterval = setInterval(() => {
-        if (!roomCode || isGameRunning) return;
-
-        // 同一PCのLocalStorageからスタート検知
-        const raw = localStorage.getItem(getRoomStorageKey(roomCode));
-        if (raw) {
-          try {
-            const room = JSON.parse(raw);
-            if (room.members) renderMemberList('client-member-list', room.members);
-            if (room.isGameRunning) {
-              currentMode = 'multi';
-              timeLeft = 60;
-              score = 0;
-              initMultiGame(room.members);
-            }
-          } catch(e){}
-        }
-      }, 60);
-    }
-
-    function broadcastMyPlayer() {
-      const me = players.find(p => p.id === myPlayerId);
-      if (!me) return;
-      const data = {
-        type: 'PLAYER_UPDATE',
-        id: me.id,
-        x: me.x,
-        y: me.y,
-        direction: me.direction,
-        holding: me.holding
-      };
-
-      if (isHost) {
-        broadcastToClients(data);
-      } else if (clientConnection && clientConnection.open) {
-        clientConnection.send(data);
-      }
+          count++;
+          if (count > 5 || isGameRunning) clearInterval(joinInterval);
+        }, 300);
+      });
     }
 
     function renderMemberList(containerId, members) {
@@ -946,8 +863,8 @@
         div.style.padding = '4px 8px';
         div.style.background = '#1e272e';
         div.style.borderRadius = '4px';
-        const isMe = (m.id === myPlayerId);
-        div.innerHTML = `${icons[idx]} <strong style="color:${m.color || PLAYER_DEFAULTS[idx].color};">${m.id}P:</strong> <strong>${m.name}</strong> ${isMe ? '<span style="color:#fbc531;">(あなた)</span>' : '<span style="color:#4cd137;">(参加中)</span>'}`;
+        const isMe = (m.clientId === myClientId) || (isHost && idx === 0);
+        div.innerHTML = `${icons[idx]} <strong style="color:${m.color || PLAYER_DEFAULTS[idx].color};">${idx + 1}P:</strong> <strong>${m.name}</strong> ${isMe ? '<span style="color:#fbc531;">(あなた)</span>' : '<span style="color:#4cd137;">(参加中)</span>'}`;
         container.appendChild(div);
       });
 
@@ -961,13 +878,12 @@
     }
 
     function leaveRoom() {
-      if (peer) peer.destroy();
+      if (mqttClient) mqttClient.end();
       backToTitle();
     }
 
     function backToTitle() {
-      if (syncInterval) clearInterval(syncInterval);
-      if (peer) peer.destroy();
+      if (mqttClient) mqttClient.end();
       roomCode = '';
       document.getElementById('view-title').style.display = 'flex';
       document.getElementById('view-host').style.display = 'none';
@@ -983,7 +899,7 @@
         const def = PLAYER_DEFAULTS[idx];
         return {
           ...def,
-          id: m.id,
+          id: idx + 1,
           name: m.name,
           color: m.color || def.color,
           x: def.startX, y: def.startY,
@@ -1035,6 +951,17 @@
             clearInterval(timerInterval);
             endGame();
           }
+
+          // ホストがゲーム盤面を定期配信
+          if (isHost) {
+            sendNetMessage({
+              type: 'BOARD_SYNC',
+              score,
+              timeLeft,
+              orders,
+              stations: stations.map(s => ({ item: s.item, progress: s.progress, chopAnim: s.chopAnim }))
+            });
+          }
         }
       }, 1000);
     }
@@ -1062,7 +989,7 @@
     }
 
     /* ========================================================
-       5. インタラクション
+       6. インタラクション (自由な調理)
        ======================================================== */
     function getFacingStation(player) {
       let targetX = player.x;
@@ -1102,6 +1029,7 @@
       else if (st.type === 'trash' && player.holding) {
         player.holding = null;
         spawnParticles(st.x + st.w/2, st.y + st.h/2, '#7f8c8d');
+        sendNetMessage({ type: 'EFFECT', x: st.x + st.w/2, y: st.y + st.h/2, color: '#7f8c8d', count: 12 });
       }
       else if (st.type === 'board') {
         if (!st.item && player.holding) {
@@ -1114,7 +1042,9 @@
           if (st.progress < 100) {
             st.progress += 25;
             st.chopAnim = 12;
-            spawnParticles(st.x + st.w/2, st.y + st.h/2, st.item.type === 'tomato' ? '#ff4757' : '#2ed573');
+            const c = st.item.type === 'tomato' ? '#ff4757' : '#2ed573';
+            spawnParticles(st.x + st.w/2, st.y + st.h/2, c);
+            sendNetMessage({ type: 'EFFECT', x: st.x + st.w/2, y: st.y + st.h/2, color: c, count: 10 });
             if (st.progress >= 100) {
               if (st.item.type === 'tomato') st.item = { type: 'cut_tomato' };
               if (st.item.type === 'lettuce') st.item = { type: 'cut_lettuce' };
@@ -1127,6 +1057,7 @@
             } else if (player.holding.type === 'plate') {
               player.holding.contents.push(st.item.type);
               spawnParticles(st.x + st.w/2, st.y + st.h/2, '#fbc531');
+              sendNetMessage({ type: 'EFFECT', x: st.x + st.w/2, y: st.y + st.h/2, color: '#fbc531', count: 12 });
               st.item = null;
               st.progress = 0;
             }
@@ -1141,10 +1072,12 @@
           if (player.holding && player.holding.type === 'plate' && st.item.type !== 'plate') {
             player.holding.contents.push(st.item.type);
             spawnParticles(st.x + st.w/2, st.y + st.h/2, '#fbc531');
+            sendNetMessage({ type: 'EFFECT', x: st.x + st.w/2, y: st.y + st.h/2, color: '#fbc531', count: 12 });
             st.item = null;
           } else if (player.holding && player.holding.type !== 'plate' && st.item.type === 'plate') {
             st.item.contents.push(player.holding.type);
             spawnParticles(st.x + st.w/2, st.y + st.h/2, '#fbc531');
+            sendNetMessage({ type: 'EFFECT', x: st.x + st.w/2, y: st.y + st.h/2, color: '#fbc531', count: 12 });
             player.holding = null;
           } else if (!player.holding) {
             player.holding = st.item;
@@ -1176,6 +1109,9 @@
         addFloatingText(player.x, player.y - 30, `+${bonusSec}秒! (+¥${matched.reward})`, '#2ed573');
         spawnParticles(canvas.width / 2, canvas.height / 2, '#fbc531', 40);
 
+        sendNetMessage({ type: 'TEXT', x: player.x, y: player.y - 30, text: `+${bonusSec}秒! (+¥${matched.reward})`, color: '#2ed573' });
+        sendNetMessage({ type: 'EFFECT', x: canvas.width / 2, y: canvas.height / 2, color: '#fbc531', count: 40 });
+
         orders.splice(orderIdx, 1);
         
         setTimeout(() => {
@@ -1186,6 +1122,7 @@
         }, 1500);
       } else {
         addFloatingText(player.x, player.y - 30, `注文と違います！`, '#ff4757');
+        sendNetMessage({ type: 'TEXT', x: player.x, y: player.y - 30, text: '注文と違います！', color: '#ff4757' });
       }
       updateUI();
     }
@@ -1208,7 +1145,7 @@
     }
 
     /* ========================================================
-       6. グラフィック描画
+       7. グラフィック描画
        ======================================================== */
     function drawTomato(x, y, size) {
       ctx.save();
@@ -1390,7 +1327,7 @@
     }
 
     /* ========================================================
-       7. ゲームループ & レンダリング
+       8. ループ & レンダリング
        ======================================================== */
     function update() {
       if (!isGameRunning) return;
@@ -1656,7 +1593,7 @@
     }
 
     /* ========================================================
-       8. UI 更新
+       9. UI 更新
        ======================================================== */
     function updateUI() {
       document.getElementById('score').innerText = `${score} 点`;
