@@ -1,0 +1,1512 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>お料理教室 - クッキングシミュレーション</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #2f3640;
+      color: #f5f6fa;
+      font-family: 'Hiragino Kaku Gothic ProN', 'Meiryo', sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 14px;
+      user-select: none;
+    }
+    header {
+      text-align: center;
+      margin-bottom: 8px;
+    }
+    h1 {
+      font-size: 26px;
+      color: #fbc531;
+      text-shadow: 2px 2px 0 #273c75;
+      letter-spacing: 1px;
+    }
+    #guide-banner {
+      background: #353b48;
+      border: 2px solid #718093;
+      padding: 6px 14px;
+      border-radius: 20px;
+      margin-bottom: 10px;
+      font-size: 13px;
+      color: #dcdde1;
+      display: flex;
+      gap: 16px;
+      align-items: center;
+      justify-content: center;
+    }
+    .badge {
+      background: #44bd32;
+      color: white;
+      padding: 3px 8px;
+      border-radius: 12px;
+      font-weight: bold;
+      font-size: 12px;
+    }
+    #game-container {
+      position: relative;
+      display: flex;
+      gap: 16px;
+      align-items: flex-start;
+    }
+    #canvas-wrap {
+      position: relative;
+    }
+    canvas {
+      background: #718093;
+      border: 4px solid #487eb0;
+      border-radius: 12px;
+      box-shadow: 0 10px 25px rgba(0,0,0,0.4);
+      display: block;
+    }
+    #sidebar {
+      width: 320px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .panel {
+      background: #353b48;
+      border-radius: 10px;
+      padding: 10px 12px;
+      border-left: 5px solid #4cd137;
+      box-shadow: 0 4px 10px rgba(0,0,0,0.2);
+    }
+    .panel.accent { border-left-color: #e1b12c; }
+    .panel.db { border-left-color: #00a8ff; }
+    .panel h2 {
+      font-size: 14px;
+      color: #f5f6fa;
+      margin-bottom: 6px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .stat-row {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 4px;
+      font-size: 14px;
+    }
+    .stat-value {
+      font-weight: bold;
+      color: #fbc531;
+    }
+    .order-card {
+      background: linear-gradient(135deg, #e67e22, #d35400);
+      color: white;
+      padding: 8px 10px;
+      border-radius: 8px;
+      margin-bottom: 6px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+      animation: popIn 0.3s ease;
+    }
+    .order-card.burger-card {
+      background: linear-gradient(135deg, #c0392b, #8e44ad);
+    }
+    @keyframes popIn {
+      from { transform: scale(0.9); opacity: 0; }
+      to { transform: scale(1); opacity: 1; }
+    }
+    #db-records {
+      font-size: 11px;
+      line-height: 1.4;
+      background: #1e272e;
+      padding: 8px;
+      border-radius: 6px;
+      font-family: 'Consolas', monospace;
+      color: #00d2d3;
+      max-height: 140px;
+      overflow-y: auto;
+    }
+
+    /* タイトル画面・モーダルオーバーレイ */
+    #overlay-screen {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 760px;
+      height: 520px;
+      background: rgba(47, 54, 64, 0.95);
+      border-radius: 12px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 10;
+      backdrop-filter: blur(5px);
+    }
+    .mode-cards {
+      display: flex;
+      gap: 20px;
+      margin-top: 20px;
+    }
+    .mode-card {
+      background: #353b48;
+      border: 3px solid #718093;
+      border-radius: 14px;
+      padding: 20px 24px;
+      width: 260px;
+      text-align: center;
+      box-shadow: 0 8px 20px rgba(0,0,0,0.3);
+    }
+    .mode-card h3 {
+      font-size: 20px;
+      margin-bottom: 8px;
+      color: #fbc531;
+    }
+    .mode-card p {
+      font-size: 12px;
+      color: #dcdde1;
+      line-height: 1.6;
+      margin-bottom: 14px;
+    }
+    .btn-main {
+      background: #44bd32;
+      color: white;
+      border: none;
+      padding: 10px 18px;
+      border-radius: 20px;
+      font-size: 14px;
+      font-weight: bold;
+      cursor: pointer;
+      width: 100%;
+      transition: 0.2s;
+    }
+    .btn-main:hover { background: #4cd137; transform: scale(1.02); }
+    .btn-secondary {
+      background: #0984e3;
+      color: white;
+      border: none;
+      padding: 8px 14px;
+      border-radius: 8px;
+      font-size: 13px;
+      cursor: pointer;
+      margin-top: 6px;
+      width: 100%;
+      font-weight: bold;
+    }
+    .btn-secondary:hover { background: #74b9ff; }
+
+    /* パスワード入力・ロビー画面 */
+    .lobby-box {
+      background: #353b48;
+      border: 3px solid #fbc531;
+      border-radius: 14px;
+      padding: 24px 30px;
+      width: 440px;
+      text-align: center;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+    }
+    .room-code-display {
+      font-size: 38px;
+      font-weight: bold;
+      letter-spacing: 8px;
+      color: #fbc531;
+      background: #1e272e;
+      padding: 10px;
+      border-radius: 8px;
+      margin: 14px 0;
+      border: 2px dashed #fbc531;
+    }
+    .code-input {
+      font-size: 28px;
+      text-align: center;
+      letter-spacing: 6px;
+      width: 180px;
+      padding: 8px;
+      border-radius: 8px;
+      border: 2px solid #00a8ff;
+      background: #1e272e;
+      color: #fff;
+      margin: 12px 0;
+    }
+    .member-list {
+      background: #2f3542;
+      padding: 10px;
+      border-radius: 8px;
+      margin: 12px 0;
+      text-align: left;
+      font-size: 13px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>🍳 お料理教室 - クッキングシミュレーション 🍔</h1>
+  </header>
+
+  <div id="guide-banner">
+    <div><span class="badge">操作</span> <strong>W, A, S, D</strong> で移動 | <strong>Space</strong> で取る・置く・切る・盛る</div>
+    <div style="color: #fbc531;">※マルチモードでも、それぞれのブラウザで全員が同じ操作方法（WASD+Space）で自由に動けます！</div>
+  </div>
+
+  <div id="game-container">
+    <div id="canvas-wrap">
+      <canvas id="gameCanvas" width="760" height="520"></canvas>
+
+      <!-- モーダル・タイトル・ロビー画面 -->
+      <div id="overlay-screen">
+        <!-- 画面1: タイトル・モード選択 -->
+        <div id="view-title" style="display: flex; flex-direction: column; align-items: center;">
+          <h2 style="font-size: 30px; color: #fbc531; text-shadow: 2px 2px 0 #192a56; margin-bottom: 6px;">
+            👨‍🍳 モードを選んでスタート！ 👩‍🍳
+          </h2>
+          <p style="color: #dcdde1; font-size: 14px;">マルチモードは4桁の合言葉（パスワード）で別ウィンドウから参加できます！</p>
+
+          <div class="mode-cards">
+            <!-- シングルモード -->
+            <div class="mode-card">
+              <h3>👤 シングルモード</h3>
+              <p>
+                1人でじっくり厨房を切り盛り！<br>
+                <strong>初期タイム: 70秒</strong><br>
+                🥗 サラダ: <span style="color:#2ed573;">+10秒</span><br>
+                🍔 バーガー: <span style="color:#fbc531;">+15秒</span>
+              </p>
+              <button class="btn-main" onclick="startSingleGame()">1人で遊ぶ</button>
+            </div>
+
+            <!-- マルチモード -->
+            <div class="mode-card">
+              <h3>👥 マルチモード</h3>
+              <p>
+                最大3人で自由にお料理！<br>
+                役割の制限なし！誰でも何でもOK！<br>
+                <strong>初期タイム: 60秒</strong><br>
+                🥗 サラダ: <span style="color:#2ed573;">+5秒</span><br>
+                🍔 バーガー: <span style="color:#fbc531;">+10秒</span>
+              </p>
+              <button class="btn-main" style="background:#e67e22;" onclick="showHostLobby()">リーダーとして部屋を作る</button>
+              <button class="btn-secondary" onclick="showJoinLobby()">パスワードで参加する</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 画面2: リーダー部屋作成ロビー -->
+        <div id="view-host" class="lobby-box" style="display: none;">
+          <h3 style="color:#fbc531; font-size: 22px;">👑 ルームを作成しました！</h3>
+          <p style="font-size: 13px; color:#dcdde1; margin-top: 4px;">他のプレイヤーにこの4桁の合言葉を教えてね！</p>
+          <div class="room-code-display" id="host-code-display">----</div>
+
+          <div style="font-size: 13px; color:#a4b0be; text-align: left;">参加者リスト (最大3人):</div>
+          <div class="member-list" id="host-member-list">
+            <div>🟦 <strong>1P (あなた/リーダー)</strong>: 準備完了</div>
+          </div>
+
+          <button class="btn-main" id="btn-host-start" onclick="hostStartGame()">全員揃ったのでゲーム開始！</button>
+          <button class="btn-secondary" style="background:#57606f; margin-top: 8px;" onclick="backToTitle()">戻る</button>
+        </div>
+
+        <!-- 画面3: 参加者パスワード入力画面 -->
+        <div id="view-join" class="lobby-box" style="display: none;">
+          <h3 style="color:#00a8ff; font-size: 22px;">🤝 部屋に参加する</h3>
+          <p style="font-size: 13px; color:#dcdde1; margin-top: 4px;">リーダーが作成した<strong>4桁のパスワード</strong>を入力してね：</p>
+          <div>
+            <input type="text" id="join-code-input" class="code-input" maxlength="4" placeholder="1234" autofocus>
+          </div>
+          <button class="btn-main" onclick="joinRoom()">部屋に参加する</button>
+          <button class="btn-secondary" style="background:#57606f; margin-top: 8px;" onclick="backToTitle()">戻る</button>
+        </div>
+
+        <!-- 画面4: 参加者待機ロビー -->
+        <div id="view-client-waiting" class="lobby-box" style="display: none;">
+          <h3 style="color:#4cd137; font-size: 22px;">🎉 参加完了！</h3>
+          <p style="font-size: 13px; color:#dcdde1; margin-top: 6px;">リーダーがゲームを開始するのを待っています...</p>
+          <div class="room-code-display" id="client-code-display">----</div>
+          <div style="font-size: 14px; color:#fbc531;" id="client-my-slot">あなた: 2P</div>
+        </div>
+      </div>
+    </div>
+    
+    <div id="sidebar">
+      <div class="panel">
+        <h2>📊 クラスの状況 (<span id="mode-label">選択中</span>)</h2>
+        <div class="stat-row">
+          <span>スコア:</span>
+          <span class="stat-value" id="score">0 点</span>
+        </div>
+        <div class="stat-row">
+          <span>残り時間:</span>
+          <span class="stat-value" id="timer" style="font-size: 18px; color:#ff4757;">-- 秒</span>
+        </div>
+        <div id="players-holding" style="margin-top: 6px; font-size: 12px; display: flex; flex-direction: column; gap: 4px;"></div>
+      </div>
+
+      <div class="panel accent">
+        <h2>📋 お客様の注文</h2>
+        <div id="order-list"></div>
+      </div>
+
+      <div class="panel db">
+        <h2>🗄️ レシピ＆スコア DB (IndexedDB)</h2>
+        <div id="db-records">データベース読込中...</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    /* ========================================================
+       1. データベース層 (IndexedDB)
+       ======================================================== */
+    const DB_NAME = 'CookingClassDB';
+    const DB_VERSION = 4;
+    let db = null;
+
+    function initDatabase() {
+      return new Promise((resolve) => {
+        const req = indexedDB.open(DB_NAME, DB_VERSION);
+        req.onupgradeneeded = (e) => {
+          const dbInstance = e.target.result;
+          if (!dbInstance.objectStoreNames.contains('recipes')) {
+            dbInstance.createObjectStore('recipes', { keyPath: 'id' });
+          }
+          if (!dbInstance.objectStoreNames.contains('scores')) {
+            dbInstance.createObjectStore('scores', { autoIncrement: true });
+          }
+        };
+        req.onsuccess = (e) => {
+          db = e.target.result;
+          seedMasterData().then(resolve);
+        };
+      });
+    }
+
+    async function seedMasterData() {
+      const tx = db.transaction(['recipes'], 'readwrite');
+      const store = tx.objectStore('recipes');
+      
+      store.put({
+        id: 'salad', name: '特製フレッシュサラダ',
+        ingredients: ['cut_tomato', 'cut_lettuce'],
+        reward: 120, bonusSingle: 10, bonusMulti: 5,
+        desc: 'カットトマト + カットレタス'
+      });
+      store.put({
+        id: 'burger', name: '絶品ハンバーガー',
+        ingredients: ['bun', 'meat', 'lettuce', 'tomato'],
+        reward: 250, bonusSingle: 15, bonusMulti: 10,
+        desc: 'バンズ + 肉 + レタス + トマト'
+      });
+      await refreshDBMonitor();
+    }
+
+    function saveScoreToDB(scoreVal, modeDesc) {
+      if (!db) return;
+      const tx = db.transaction(['scores'], 'readwrite');
+      tx.objectStore('scores').add({
+        score: scoreVal,
+        mode: modeDesc,
+        time: new Date().toLocaleTimeString()
+      });
+      tx.oncomplete = () => refreshDBMonitor();
+    }
+
+    function refreshDBMonitor() {
+      if (!db) return;
+      const tx = db.transaction(['recipes', 'scores'], 'readonly');
+      const recReq = tx.objectStore('recipes').getAll();
+      const scoreReq = tx.objectStore('scores').getAll();
+
+      tx.oncomplete = () => {
+        const container = document.getElementById('db-records');
+        let html = '<strong style="color:#fbc531;">【レシピマスタ】</strong><br>';
+        recReq.result.forEach(r => {
+          html += `・<strong>${r.name}</strong> (¥${r.reward})<br>&nbsp;&nbsp;[単+${r.bonusSingle}秒 / 複+${r.bonusMulti}秒]<br>`;
+        });
+        html += '<br><strong style="color:#fbc531;">【直近のスコア記録】</strong><br>';
+        const list = scoreReq.result.slice(-3).reverse();
+        if (list.length === 0) html += '履歴なし';
+        list.forEach(s => {
+          html += `・${s.time} [${s.mode || 'シングル'}] ${s.score}点<br>`;
+        });
+        container.innerHTML = html;
+      };
+    }
+
+    /* ========================================================
+       2. ゲーム基本設定 & プレイヤー構成
+       ======================================================== */
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+
+    let currentMode = 'single'; // 'single' | 'multi'
+    let isHost = true;
+    let myPlayerId = 1; // 1, 2, 3
+    let roomCode = '';
+    let broadcastChannel = null;
+
+    let isGameRunning = false;
+    let score = 0;
+    let timeLeft = 70;
+    let timerInterval = null;
+
+    const PLAYER_DEFAULTS = [
+      { id: 1, name: '1P (青)', color: '#0984e3', startX: 300, startY: 260 },
+      { id: 2, name: '2P (赤)', color: '#d63031', startX: 380, startY: 260 },
+      { id: 3, name: '3P (緑)', color: '#00b894', startX: 460, startY: 260 }
+    ];
+
+    let players = [];
+
+    // 調理ステーション
+    const stations = [
+      { id: 'box_tomato',  x: 20,  y: 25, w: 70, h: 70, type: 'box', item: 'tomato', name: 'トマト箱' },
+      { id: 'box_lettuce', x: 100, y: 25, w: 70, h: 70, type: 'box', item: 'lettuce', name: 'レタス箱' },
+      { id: 'box_meat',    x: 180, y: 25, w: 70, h: 70, type: 'box', item: 'meat', name: 'お肉箱' },
+      { id: 'box_bun',     x: 260, y: 25, w: 70, h: 70, type: 'box', item: 'bun', name: 'バンズ箱' },
+      { id: 'plate_rack',  x: 370, y: 25, w: 75, h: 70, type: 'plate_rack', name: 'お皿置き場' },
+      { id: 'trash',       x: 480, y: 25, w: 65, h: 70, type: 'trash', name: 'ゴミ箱' },
+      { id: 'delivery',    x: 580, y: 25, w: 155, h: 70, type: 'delivery', name: '配膳カウンター' },
+
+      { id: 'board_1', x: 40,  y: 415, w: 90, h: 75, type: 'board', item: null, progress: 0, chopAnim: 0, name: 'まな板 1' },
+      { id: 'board_2', x: 150, y: 415, w: 90, h: 75, type: 'board', item: null, progress: 0, chopAnim: 0, name: 'まな板 2' },
+      { id: 'table_1', x: 280, y: 415, w: 90, h: 75, type: 'table', item: null, name: '盛り付け台 1' },
+      { id: 'table_2', x: 390, y: 415, w: 90, h: 75, type: 'table', item: null, name: '盛り付け台 2' },
+      { id: 'table_3', x: 500, y: 415, w: 90, h: 75, type: 'table', item: null, name: '盛り付け台 3' },
+      { id: 'table_4', x: 610, y: 415, w: 90, h: 75, type: 'table', item: null, name: '盛り付け台 4' }
+    ];
+
+    let particles = [];
+    let floatingTexts = [];
+
+    const RECIPES = {
+      salad: {
+        id: 'salad', name: '特製フレッシュサラダ',
+        required: ['cut_lettuce', 'cut_tomato'],
+        reward: 120, icon: '🥗',
+        getBonus: () => currentMode === 'single' ? 10 : 5
+      },
+      burger: {
+        id: 'burger', name: '絶品ハンバーガー',
+        required: ['bun', 'lettuce', 'meat', 'tomato'],
+        reward: 250, icon: '🍔',
+        getBonus: () => currentMode === 'single' ? 15 : 10
+      }
+    };
+
+    let orders = [];
+
+    /* ========================================================
+       3. 入力管理 (自分のプレイヤーを動かす)
+       ======================================================== */
+    const keys = {};
+    window.addEventListener('keydown', (e) => {
+      const k = e.key.toLowerCase();
+      keys[k] = true;
+
+      if (!isGameRunning) return;
+
+      // 自分のプレイヤーのアクション
+      if (e.code === 'Space' || k === ' ') {
+        e.preventDefault();
+        const me = players.find(p => p.id === myPlayerId);
+        if (me) {
+          interact(me);
+          syncMyState();
+        }
+      }
+    });
+
+    window.addEventListener('keyup', (e) => {
+      keys[e.key.toLowerCase()] = false;
+    });
+
+    /* ========================================================
+       4. マルチ通信 (BroadcastChannel を使った合言葉同期)
+       ======================================================== */
+    function setupChannel(code) {
+      if (broadcastChannel) broadcastChannel.close();
+      roomCode = code;
+      broadcastChannel = new BroadcastChannel(`cooking_room_${code}`);
+
+      broadcastChannel.onmessage = (e) => {
+        const msg = e.data;
+        if (!msg) return;
+
+        // --- ホスト側が受けるメッセージ ---
+        if (isHost) {
+          if (msg.type === 'JOIN_REQUEST') {
+            if (players.length < 3) {
+              const newSlot = players.length + 1;
+              const cfg = PLAYER_DEFAULTS[newSlot - 1];
+              players.push({
+                ...cfg,
+                x: cfg.startX, y: cfg.startY,
+                radius: 20, speed: 3.8, direction: 'down', holding: null
+              });
+
+              // 参加承認を返す
+              broadcastChannel.postMessage({
+                type: 'JOIN_ACCEPTED',
+                targetClientId: msg.clientId,
+                assignedSlot: newSlot,
+                memberCount: players.length
+              });
+
+              updateHostMemberList();
+            }
+          }
+        }
+
+        // --- クライアント側が受けるメッセージ ---
+        if (!isHost) {
+          if (msg.type === 'JOIN_ACCEPTED' && msg.targetClientId === myClientId) {
+            myPlayerId = msg.assignedSlot;
+            document.getElementById('client-my-slot').innerText = `あなたのプレイヤー: ${myPlayerId}P (${PLAYER_DEFAULTS[myPlayerId-1].name})`;
+          }
+          if (msg.type === 'GAME_START') {
+            currentMode = 'multi';
+            timeLeft = 60;
+            score = 0;
+            initMultiGame(msg.playerCount);
+          }
+        }
+
+        // --- 全員が共有するインゲーム同期メッセージ ---
+        if (isGameRunning) {
+          if (msg.type === 'PLAYER_SYNC') {
+            const targetP = players.find(p => p.id === msg.id);
+            if (targetP && targetP.id !== myPlayerId) {
+              targetP.x = msg.x;
+              targetP.y = msg.y;
+              targetP.direction = msg.direction;
+              targetP.holding = msg.holding;
+            }
+          }
+          if (msg.type === 'STATIONS_SYNC') {
+            // ステーション状態の完全同期
+            msg.stations.forEach((srcSt, idx) => {
+              if (stations[idx]) {
+                stations[idx].item = srcSt.item;
+                stations[idx].progress = srcSt.progress;
+                stations[idx].chopAnim = srcSt.chopAnim;
+              }
+            });
+            score = msg.score;
+            timeLeft = msg.timeLeft;
+            orders = msg.orders;
+            updateUI();
+          }
+          if (msg.type === 'ACTION_EFFECT') {
+            spawnParticles(msg.x, msg.y, msg.color, msg.count);
+          }
+          if (msg.type === 'FLOATING_TEXT') {
+            addFloatingText(msg.x, msg.y, msg.text, msg.color);
+          }
+        }
+      };
+    }
+
+    let myClientId = 'client_' + Math.random().toString(36).substr(2, 9);
+
+    function syncMyState() {
+      if (currentMode !== 'multi' || !broadcastChannel) return;
+      const me = players.find(p => p.id === myPlayerId);
+      if (me) {
+        broadcastChannel.postMessage({
+          type: 'PLAYER_SYNC',
+          id: me.id,
+          x: me.x,
+          y: me.y,
+          direction: me.direction,
+          holding: me.holding
+        });
+      }
+      // ホストはステーションやスコア、残り時間も同期配信用に送る
+      if (isHost) {
+        broadcastChannel.postMessage({
+          type: 'STATIONS_SYNC',
+          stations: stations.map(s => ({ item: s.item, progress: s.progress, chopAnim: s.chopAnim })),
+          score,
+          timeLeft,
+          orders
+        });
+      }
+    }
+
+    /* ========================================================
+       5. UI遷移 (ロビー＆画面切り替え)
+       ======================================================== */
+    function backToTitle() {
+      document.getElementById('view-title').style.display = 'flex';
+      document.getElementById('view-host').style.display = 'none';
+      document.getElementById('view-join').style.display = 'none';
+      document.getElementById('view-client-waiting').style.display = 'none';
+    }
+
+    // シングル開始
+    function startSingleGame() {
+      currentMode = 'single';
+      isHost = true;
+      myPlayerId = 1;
+      document.getElementById('overlay-screen').style.display = 'none';
+      document.getElementById('mode-label').innerText = '👤 シングル';
+      
+      timeLeft = 70;
+      score = 0;
+      isGameRunning = true;
+
+      // 1Pのみ生成
+      players = [{
+        ...PLAYER_DEFAULTS[0],
+        x: PLAYER_DEFAULTS[0].startX, y: PLAYER_DEFAULTS[0].startY,
+        radius: 20, speed: 3.8, direction: 'down', holding: null
+      }];
+
+      resetStationsAndOrders();
+      startTimer();
+      updateUI();
+    }
+
+    // ホストとして部屋作成
+    function showHostLobby() {
+      isHost = true;
+      myPlayerId = 1;
+      const code = Math.floor(1000 + Math.random() * 9000).toString(); // 4桁乱数
+      document.getElementById('host-code-display').innerText = code;
+
+      setupChannel(code);
+
+      players = [{
+        ...PLAYER_DEFAULTS[0],
+        x: PLAYER_DEFAULTS[0].startX, y: PLAYER_DEFAULTS[0].startY,
+        radius: 20, speed: 3.8, direction: 'down', holding: null
+      }];
+
+      document.getElementById('view-title').style.display = 'none';
+      document.getElementById('view-host').style.display = 'block';
+      updateHostMemberList();
+    }
+
+    function updateHostMemberList() {
+      const container = document.getElementById('host-member-list');
+      const icons = ['🟦', '🟥', '🟩'];
+      container.innerHTML = '';
+      players.forEach((p, idx) => {
+        const div = document.createElement('div');
+        div.innerHTML = `${icons[idx]} <strong>${p.name}</strong>: 接続中`;
+        container.appendChild(div);
+      });
+      if (players.length < 3) {
+        const div = document.createElement('div');
+        div.style.color = '#718093';
+        div.innerHTML = `⏳ 次の参加者を待機中... (${players.length}/3)`;
+        container.appendChild(div);
+      }
+    }
+
+    // ホストがゲーム開始
+    function hostStartGame() {
+      currentMode = 'multi';
+      broadcastChannel.postMessage({
+        type: 'GAME_START',
+        playerCount: players.length
+      });
+      timeLeft = 60;
+      score = 0;
+      initMultiGame(players.length);
+    }
+
+    // 参加画面表示
+    function showJoinLobby() {
+      document.getElementById('view-title').style.display = 'none';
+      document.getElementById('view-join').style.display = 'block';
+      document.getElementById('join-code-input').value = '';
+    }
+
+    // 参加ボタン
+    function joinRoom() {
+      const code = document.getElementById('join-code-input').value.trim();
+      if (code.length !== 4) {
+        alert('4桁のパスワードを入力してください！');
+        return;
+      }
+      isHost = false;
+      setupChannel(code);
+
+      document.getElementById('view-join').style.display = 'none';
+      document.getElementById('view-client-waiting').style.display = 'block';
+      document.getElementById('client-code-display').innerText = code;
+
+      // 参加リクエスト送信
+      setTimeout(() => {
+        broadcastChannel.postMessage({
+          type: 'JOIN_REQUEST',
+          clientId: myClientId
+        });
+      }, 300);
+    }
+
+    function initMultiGame(count) {
+      document.getElementById('overlay-screen').style.display = 'none';
+      document.getElementById('mode-label').innerText = `👥 マルチ (合言葉: ${roomCode})`;
+
+      // 人数分プレイヤー初期化
+      players = [];
+      for (let i = 0; i < count; i++) {
+        const cfg = PLAYER_DEFAULTS[i];
+        players.push({
+          ...cfg,
+          x: cfg.startX, y: cfg.startY,
+          radius: 20, speed: 3.8, direction: 'down', holding: null
+        });
+      }
+
+      resetStationsAndOrders();
+      isGameRunning = true;
+
+      if (isHost) {
+        startTimer();
+      }
+      updateUI();
+    }
+
+    function resetStationsAndOrders() {
+      stations.forEach(s => {
+        if (s.type === 'board' || s.type === 'table') {
+          s.item = null;
+          s.progress = 0;
+          s.chopAnim = 0;
+        }
+      });
+      orders = [
+        { ...RECIPES.salad },
+        { ...RECIPES.burger }
+      ];
+    }
+
+    function startTimer() {
+      if (timerInterval) clearInterval(timerInterval);
+      timerInterval = setInterval(() => {
+        if (isGameRunning) {
+          timeLeft--;
+          document.getElementById('timer').innerText = `${timeLeft} 秒`;
+          if (timeLeft <= 10) {
+            document.getElementById('timer').style.color = '#e84118';
+          } else {
+            document.getElementById('timer').style.color = '#ff4757';
+          }
+
+          if (timeLeft <= 0) {
+            isGameRunning = false;
+            clearInterval(timerInterval);
+            endGame();
+          }
+          syncMyState();
+        }
+      }, 1000);
+    }
+
+    function endGame() {
+      const modeDesc = currentMode === 'single' ? 'シングル' : `マルチ(${players.length}人 - 部屋:${roomCode})`;
+      saveScoreToDB(score, modeDesc);
+
+      const overlay = document.getElementById('overlay-screen');
+      overlay.innerHTML = `
+        <h2 style="font-size: 32px; color: #ff4757; text-shadow: 2px 2px 0 #192a56; margin-bottom: 8px;">
+          ⏰ タイムアップ！
+        </h2>
+        <p style="font-size: 20px; color: #fbc531; font-weight: bold; margin-bottom: 4px;">
+          最終スコア: ${score} 点
+        </p>
+        <p style="font-size: 14px; color: #dcdde1; margin-bottom: 20px;">
+          プレイモード: ${modeDesc}
+        </p>
+        <button class="btn-main" style="width: 220px; font-size: 16px; padding: 10px;" onclick="location.reload()">
+          タイトル画面に戻る
+        </button>
+      `;
+      overlay.style.display = 'flex';
+    }
+
+    /* ========================================================
+       6. インタラクション (誰でも何でも完全に自由！)
+       ======================================================== */
+    function getFacingStation(player) {
+      let targetX = player.x;
+      let targetY = player.y;
+      const reach = 42;
+
+      if (player.direction === 'up') targetY -= reach;
+      else if (player.direction === 'down') targetY += reach;
+      else if (player.direction === 'left') targetX -= reach;
+      else if (player.direction === 'right') targetX += reach;
+
+      let bestStation = null;
+      let minDist = 75;
+
+      stations.forEach(s => {
+        const centerX = s.x + s.w / 2;
+        const centerY = s.y + s.h / 2;
+        const dist = Math.hypot(targetX - centerX, targetY - centerY);
+        if (dist < minDist) {
+          minDist = dist;
+          bestStation = s;
+        }
+      });
+      return bestStation;
+    }
+
+    function interact(player) {
+      const st = getFacingStation(player);
+      if (!st) return;
+
+      // 1. 食材箱
+      if (st.type === 'box' && !player.holding) {
+        player.holding = { type: st.item };
+      }
+      // 2. 皿ラック
+      else if (st.type === 'plate_rack' && !player.holding) {
+        player.holding = { type: 'plate', contents: [] };
+      }
+      // 3. ゴミ箱
+      else if (st.type === 'trash' && player.holding) {
+        player.holding = null;
+        broadcastEffect(st.x + st.w/2, st.y + st.h/2, '#7f8c8d');
+      }
+      // 4. まな板
+      else if (st.type === 'board') {
+        if (!st.item && player.holding) {
+          if (player.holding.type === 'tomato' || player.holding.type === 'lettuce') {
+            st.item = player.holding;
+            st.progress = 0;
+            player.holding = null;
+          }
+        } else if (st.item) {
+          if (st.progress < 100) {
+            st.progress += 25;
+            st.chopAnim = 12;
+            broadcastEffect(st.x + st.w/2, st.y + st.h/2, st.item.type === 'tomato' ? '#ff4757' : '#2ed573');
+            if (st.progress >= 100) {
+              if (st.item.type === 'tomato') st.item = { type: 'cut_tomato' };
+              if (st.item.type === 'lettuce') st.item = { type: 'cut_lettuce' };
+            }
+          } else {
+            if (!player.holding) {
+              player.holding = st.item;
+              st.item = null;
+              st.progress = 0;
+            } else if (player.holding.type === 'plate') {
+              player.holding.contents.push(st.item.type);
+              broadcastEffect(st.x + st.w/2, st.y + st.h/2, '#fbc531');
+              st.item = null;
+              st.progress = 0;
+            }
+          }
+        }
+      }
+      // 5. 作業台
+      else if (st.type === 'table') {
+        if (!st.item && player.holding) {
+          st.item = player.holding;
+          player.holding = null;
+        } else if (st.item) {
+          if (player.holding && player.holding.type === 'plate' && st.item.type !== 'plate') {
+            player.holding.contents.push(st.item.type);
+            broadcastEffect(st.x + st.w/2, st.y + st.h/2, '#fbc531');
+            st.item = null;
+          } else if (player.holding && player.holding.type !== 'plate' && st.item.type === 'plate') {
+            st.item.contents.push(player.holding.type);
+            broadcastEffect(st.x + st.w/2, st.y + st.h/2, '#fbc531');
+            player.holding = null;
+          } else if (!player.holding) {
+            player.holding = st.item;
+            st.item = null;
+          }
+        }
+      }
+      // 6. 配膳口
+      else if (st.type === 'delivery') {
+        if (player.holding && player.holding.type === 'plate') {
+          checkDelivery(player, player.holding);
+          player.holding = null;
+        }
+      }
+
+      updateUI();
+    }
+
+    function checkDelivery(player, plate) {
+      const currentContents = [...plate.contents].sort().join(',');
+      const orderIdx = orders.findIndex(o => [...o.required].sort().join(',') === currentContents);
+
+      if (orderIdx !== -1) {
+        const matched = orders[orderIdx];
+        const bonusSec = matched.getBonus();
+
+        score += matched.reward;
+        timeLeft += bonusSec;
+
+        broadcastFloatingText(player.x, player.y - 30, `+${bonusSec}秒! (+¥${matched.reward})`, '#2ed573');
+        broadcastEffect(canvas.width / 2, canvas.height / 2, '#fbc531', 40);
+
+        orders.splice(orderIdx, 1);
+        
+        setTimeout(() => {
+          const list = [RECIPES.salad, RECIPES.burger];
+          const next = list[Math.floor(Math.random() * list.length)];
+          orders.push({ ...next });
+          updateUI();
+          syncMyState();
+        }, 1500);
+      } else {
+        broadcastFloatingText(player.x, player.y - 30, `注文と違います！`, '#ff4757');
+      }
+      updateUI();
+    }
+
+    function broadcastEffect(x, y, color, count = 12) {
+      spawnParticles(x, y, color, count);
+      if (broadcastChannel) {
+        broadcastChannel.postMessage({ type: 'ACTION_EFFECT', x, y, color, count });
+      }
+    }
+
+    function broadcastFloatingText(x, y, text, color) {
+      addFloatingText(x, y, text, color);
+      if (broadcastChannel) {
+        broadcastChannel.postMessage({ type: 'FLOATING_TEXT', x, y, text, color });
+      }
+    }
+
+    function addFloatingText(x, y, text, color) {
+      floatingTexts.push({ x, y, text, color, life: 60, maxLife: 60 });
+    }
+
+    function spawnParticles(x, y, color, count = 12) {
+      for (let i = 0; i < count; i++) {
+        particles.push({
+          x, y,
+          vx: (Math.random() - 0.5) * 5,
+          vy: (Math.random() - 0.5) * 5,
+          radius: Math.random() * 3 + 2,
+          color,
+          alpha: 1
+        });
+      }
+    }
+
+    /* ========================================================
+       7. グラフィック描画
+       ======================================================== */
+    function drawTomato(x, y, size) {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.fillStyle = '#ff4757';
+      ctx.beginPath();
+      ctx.arc(0, 0, size, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#c0392b';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(255,255,255,0.4)';
+      ctx.beginPath();
+      ctx.arc(-size*0.3, -size*0.3, size*0.35, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#2ed573';
+      for (let i = 0; i < 5; i++) {
+        const a = (i * Math.PI * 2) / 5;
+        ctx.beginPath();
+        ctx.arc(Math.cos(a)*size*0.5, Math.sin(a)*size*0.5 - 2, size*0.25, 0, Math.PI*2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    function drawCutTomato(x, y, size) {
+      ctx.save();
+      ctx.translate(x, y);
+      [-4, 0, 4].forEach((offset) => {
+        ctx.fillStyle = '#ff6b81';
+        ctx.beginPath();
+        ctx.ellipse(offset, offset*0.5, size*0.8, size*0.5, 0.3, 0, Math.PI*2);
+        ctx.fill();
+        ctx.strokeStyle = '#c0392b';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.fillStyle = '#ffa502';
+        ctx.fillRect(offset - 2, offset*0.5 - 1, 2, 2);
+        ctx.fillRect(offset + 2, offset*0.5 + 1, 2, 2);
+      });
+      ctx.restore();
+    }
+
+    function drawLettuce(x, y, size) {
+      ctx.save();
+      ctx.translate(x, y);
+      const leaves = [
+        { a: 0, c: '#2ed573' }, { a: 1.2, c: '#26af5f' },
+        { a: 2.4, c: '#7bed9f' }, { a: 3.6, c: '#2ed573' }
+      ];
+      leaves.forEach(l => {
+        ctx.fillStyle = l.c;
+        ctx.beginPath();
+        ctx.arc(Math.cos(l.a)*size*0.3, Math.sin(l.a)*size*0.3, size*0.7, 0, Math.PI*2);
+        ctx.fill();
+      });
+      ctx.strokeStyle = '#1e824c';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawCutLettuce(x, y, size) {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.fillStyle = '#2ed573';
+      for (let i = 0; i < 6; i++) {
+        const lx = (i % 3 - 1) * 7;
+        const ly = (Math.floor(i / 3) - 0.5) * 7;
+        ctx.beginPath();
+        ctx.ellipse(lx, ly, size*0.6, size*0.2, (i * 0.8), 0, Math.PI*2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    function drawMeat(x, y, size) {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.fillStyle = '#6d4c24';
+      ctx.beginPath();
+      ctx.ellipse(0, 0, size * 0.9, size * 0.6, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#4e3419';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.strokeStyle = '#3e2723';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(-size*0.5, -3); ctx.lineTo(-size*0.1, 4);
+      ctx.moveTo(0, -4); ctx.lineTo(size*0.4, 3);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawBun(x, y, size) {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.fillStyle = '#e67e22';
+      ctx.beginPath();
+      ctx.arc(0, 0, size * 0.85, Math.PI, 0, false);
+      ctx.lineTo(size * 0.85, 4);
+      ctx.quadraticCurveTo(0, 6, -size * 0.85, 4);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = '#d35400';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.fillStyle = '#f5f6fa';
+      [-4, 2, -2, 5].forEach((gx, idx) => {
+        ctx.fillRect(gx, -size*0.4 + (idx%2)*3, 2, 2);
+      });
+      ctx.restore();
+    }
+
+    function drawBurgerStacked(x, y, size) {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.fillStyle = '#e67e22';
+      ctx.fillRect(-size*0.7, 4, size*1.4, 5);
+      ctx.fillStyle = '#5d4037';
+      ctx.fillRect(-size*0.8, 0, size*1.6, 5);
+      ctx.fillStyle = '#2ed573';
+      ctx.fillRect(-size*0.75, -3, size*1.5, 4);
+      ctx.fillStyle = '#ff4757';
+      ctx.fillRect(-size*0.7, -6, size*1.4, 4);
+      drawBun(0, -10, size * 0.85);
+      ctx.restore();
+    }
+
+    function drawPlate(x, y, size, contents = []) {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.fillStyle = 'rgba(0,0,0,0.15)';
+      ctx.beginPath();
+      ctx.arc(2, 3, size, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#f5f6fa';
+      ctx.beginPath();
+      ctx.arc(0, 0, size, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#dcdde1';
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+      ctx.strokeStyle = '#718093';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(0, 0, size * 0.68, 0, Math.PI * 2);
+      ctx.stroke();
+
+      const hasBun = contents.includes('bun');
+      const hasMeat = contents.includes('meat');
+      const hasLettuce = contents.includes('lettuce');
+      const hasTomato = contents.includes('tomato');
+
+      if (hasBun && hasMeat && hasLettuce && hasTomato) {
+        drawBurgerStacked(0, 0, size * 0.7);
+      } else {
+        let stackY = 4;
+        if (hasBun) { drawBun(0, stackY, size * 0.55); stackY -= 3; }
+        if (hasMeat) { drawMeat(0, stackY, size * 0.6); stackY -= 3; }
+        if (hasLettuce) { drawLettuce(0, stackY, size * 0.5); stackY -= 3; }
+        if (hasTomato) { drawTomato(0, stackY, size * 0.45); }
+        if (contents.includes('cut_lettuce')) drawCutLettuce(0, 3, size * 0.5);
+        if (contents.includes('cut_tomato')) drawCutTomato(0, -3, size * 0.5);
+      }
+      ctx.restore();
+    }
+
+    function drawItem(item, x, y, size = 16) {
+      if (!item) return;
+      if (item.type === 'tomato') drawTomato(x, y, size);
+      else if (item.type === 'cut_tomato') drawCutTomato(x, y, size);
+      else if (item.type === 'lettuce') drawLettuce(x, y, size);
+      else if (item.type === 'cut_lettuce') drawCutLettuce(x, y, size);
+      else if (item.type === 'meat') drawMeat(x, y, size);
+      else if (item.type === 'bun') drawBun(x, y, size);
+      else if (item.type === 'plate') drawPlate(x, y, size, item.contents || []);
+    }
+
+    /* ========================================================
+       8. ループ & レンダリング
+       ======================================================== */
+    function update() {
+      if (!isGameRunning) return;
+
+      // 自分のプレイヤーのみキーボードで移動
+      const me = players.find(p => p.id === myPlayerId);
+      if (me) {
+        let moved = false;
+        if (keys['w'] || keys['arrowup']) { me.y -= me.speed; me.direction = 'up'; moved = true; }
+        if (keys['s'] || keys['arrowdown']) { me.y += me.speed; me.direction = 'down'; moved = true; }
+        if (keys['a'] || keys['arrowleft']) { me.x -= me.speed; me.direction = 'left'; moved = true; }
+        if (keys['d'] || keys['arrowright']) { me.x += me.speed; me.direction = 'right'; moved = true; }
+
+        me.x = Math.max(30, Math.min(canvas.width - 30, me.x));
+        me.y = Math.max(30, Math.min(canvas.height - 30, me.y));
+
+        if (moved) syncMyState();
+      }
+
+      // パーティクル
+      for (let i = particles.length - 1; i >= 0; i--) {
+        const pt = particles[i];
+        pt.x += pt.vx;
+        pt.y += pt.vy;
+        pt.alpha -= 0.04;
+        if (pt.alpha <= 0) particles.splice(i, 1);
+      }
+
+      // フローティングテキスト
+      for (let i = floatingTexts.length - 1; i >= 0; i--) {
+        const ft = floatingTexts[i];
+        ft.y -= 0.8;
+        ft.life--;
+        if (ft.life <= 0) floatingTexts.splice(i, 1);
+      }
+
+      stations.forEach(s => {
+        if (s.type === 'board' && s.chopAnim > 0) s.chopAnim--;
+      });
+    }
+
+    function render() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // 床タイル
+      const tileSize = 40;
+      for (let r = 0; r < canvas.height / tileSize; r++) {
+        for (let c = 0; c < canvas.width / tileSize; c++) {
+          ctx.fillStyle = (r + c) % 2 === 0 ? '#dfe4ea' : '#ced6e0';
+          ctx.fillRect(c * tileSize, r * tileSize, tileSize, tileSize);
+        }
+      }
+
+      // 自分の向いているステーション判定
+      const me = players.find(p => p.id === myPlayerId);
+      const myTargetStation = me ? getFacingStation(me) : null;
+
+      // ステーション描画
+      stations.forEach(s => {
+        const isTarget = (s === myTargetStation);
+        ctx.save();
+
+        ctx.fillStyle = 'rgba(0,0,0,0.18)';
+        ctx.fillRect(s.x + 3, s.y + 4, s.w, s.h);
+
+        if (s.type === 'board') {
+          ctx.fillStyle = '#f39c12';
+          ctx.fillRect(s.x, s.y, s.w, s.h);
+          ctx.strokeStyle = '#d35400';
+          ctx.lineWidth = 3;
+          ctx.strokeRect(s.x, s.y, s.w, s.h);
+        } else if (s.type === 'box') {
+          ctx.fillStyle = '#b78b54';
+          ctx.fillRect(s.x, s.y, s.w, s.h);
+          ctx.strokeStyle = '#6d4c24';
+          ctx.lineWidth = 3;
+          ctx.strokeRect(s.x, s.y, s.w, s.h);
+        } else if (s.type === 'delivery') {
+          ctx.fillStyle = '#2f3542';
+          ctx.fillRect(s.x, s.y, s.w, s.h);
+          ctx.strokeStyle = '#fbc531';
+          ctx.lineWidth = 3;
+          ctx.strokeRect(s.x, s.y, s.w, s.h);
+        } else {
+          ctx.fillStyle = s.type === 'trash' ? '#57606f' : '#747d8c';
+          ctx.fillRect(s.x, s.y, s.w, s.h);
+          ctx.strokeStyle = '#2f3542';
+          ctx.lineWidth = 3;
+          ctx.strokeRect(s.x, s.y, s.w, s.h);
+        }
+
+        if (isTarget) {
+          ctx.strokeStyle = '#fbc531';
+          ctx.lineWidth = 4;
+          ctx.strokeRect(s.x - 2, s.y - 2, s.w + 4, s.h + 4);
+        }
+
+        const centerX = s.x + s.w / 2;
+        const centerY = s.y + s.h / 2;
+
+        if (s.type === 'box') {
+          if (s.item === 'tomato') drawTomato(centerX, centerY - 2, 16);
+          if (s.item === 'lettuce') drawLettuce(centerX, centerY - 2, 16);
+          if (s.item === 'meat') drawMeat(centerX, centerY - 2, 16);
+          if (s.item === 'bun') drawBun(centerX, centerY - 2, 16);
+        } else if (s.type === 'plate_rack') {
+          drawPlate(centerX, centerY - 2, 18);
+        } else if (s.type === 'trash') {
+          ctx.fillStyle = '#fff';
+          ctx.font = '22px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.fillText('🗑️', centerX, centerY + 8);
+        } else if (s.type === 'delivery') {
+          ctx.fillStyle = '#fbc531';
+          ctx.font = 'bold 12px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.fillText('🚚 配膳カウンター', centerX, centerY + 4);
+        } else {
+          if (s.item) drawItem(s.item, centerX, centerY, 16);
+        }
+
+        if (s.type === 'board') {
+          ctx.save();
+          const chopOffsetY = (s.chopAnim > 0) ? Math.sin(s.chopAnim) * 10 : 0;
+          ctx.translate(centerX + 18, centerY - 14 + chopOffsetY);
+          ctx.rotate(s.chopAnim > 0 ? -0.3 : 0.2);
+          ctx.fillStyle = '#ecf0f1';
+          ctx.fillRect(0, 0, 16, 6);
+          ctx.fillStyle = '#795548';
+          ctx.fillRect(-8, 1, 8, 4);
+          ctx.restore();
+
+          if (s.item && s.progress > 0 && s.progress < 100) {
+            const barW = s.w - 16;
+            ctx.fillStyle = 'rgba(0,0,0,0.5)';
+            ctx.fillRect(s.x + 8, s.y + s.h - 14, barW, 8);
+            ctx.fillStyle = '#4cd137';
+            ctx.fillRect(s.x + 8, s.y + s.h - 14, barW * (s.progress / 100), 8);
+          }
+        }
+
+        ctx.fillStyle = '#2f3542';
+        ctx.font = '10px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(s.name, centerX, s.y + s.h - 4);
+
+        ctx.restore();
+      });
+
+      // エフェクト
+      particles.forEach(p => {
+        ctx.save();
+        ctx.globalAlpha = p.alpha;
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      });
+
+      // プレイヤー描画 (全員)
+      players.forEach(p => {
+        ctx.save();
+        ctx.translate(p.x, p.y);
+
+        ctx.fillStyle = 'rgba(0,0,0,0.2)';
+        ctx.beginPath();
+        ctx.ellipse(0, 14, 16, 8, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(0, 0, p.radius, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#2d3436';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        ctx.fillStyle = '#f5f6fa';
+        ctx.beginPath();
+        ctx.arc(0, -10, 12, 0, Math.PI, true);
+        ctx.rect(-10, -12, 20, 6);
+        ctx.fill();
+        ctx.strokeStyle = '#dcdde1';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        ctx.fillStyle = '#2f3542';
+        ctx.font = 'bold 9px sans-serif';
+        ctx.textAlign = 'center';
+        const label = p.id === myPlayerId ? `${p.id}P (自分)` : `${p.id}P`;
+        ctx.fillText(label, 0, -18);
+
+        let lookX = 0, lookY = 0;
+        if (p.direction === 'up') lookY = -8;
+        if (p.direction === 'down') lookY = 8;
+        if (p.direction === 'left') lookX = -8;
+        if (p.direction === 'right') lookX = 8;
+
+        ctx.fillStyle = '#e84118';
+        ctx.beginPath();
+        ctx.arc(lookX, lookY, 4, 0, Math.PI * 2);
+        ctx.fill();
+
+        if (p.holding) {
+          drawItem(p.holding, lookX * 1.8, lookY * 1.8 - 4, 14);
+        }
+        ctx.restore();
+      });
+
+      // 自分のアクション吹き出しヒント
+      if (me && myTargetStation) {
+        let hint = null;
+        const p = me.holding;
+        const st = myTargetStation;
+
+        if (st.type === 'box' && !p) hint = `[Space] 食材を取る`;
+        if (st.type === 'plate_rack' && !p) hint = `[Space] お皿を取る`;
+        if (st.type === 'trash' && p) hint = `[Space] ゴミを捨てる`;
+        if (st.type === 'board') {
+          if (!st.item && p) hint = `[Space] 置く`;
+          else if (st.item && st.progress < 100) hint = `[Space] トントン切る！ (${st.progress}%)`;
+          else if (st.item) hint = p && p.type === 'plate' ? `[Space] お皿に盛る！` : `[Space] 取る`;
+        }
+        if (st.type === 'table') {
+          if (!st.item && p) hint = `[Space] 置く`;
+          else if (st.item) hint = `[Space] 盛る / 取る`;
+        }
+        if (st.type === 'delivery' && p && p.type === 'plate') hint = `[Space] 配膳する！`;
+
+        if (hint) {
+          ctx.save();
+          ctx.font = 'bold 12px sans-serif';
+          const tw = ctx.measureText(hint).width;
+          const bx = me.x - tw / 2 - 8;
+          const by = me.y - 48;
+
+          ctx.fillStyle = 'rgba(47, 53, 66, 0.9)';
+          ctx.fillRect(bx, by, tw + 16, 24);
+          ctx.strokeStyle = '#fbc531';
+          ctx.lineWidth = 2;
+          ctx.strokeRect(bx, by, tw + 16, 24);
+
+          ctx.fillStyle = '#fbc531';
+          ctx.textAlign = 'center';
+          ctx.fillText(hint, me.x, by + 16);
+          ctx.restore();
+        }
+      }
+
+      // フローティングテキスト
+      floatingTexts.forEach(ft => {
+        ctx.save();
+        ctx.globalAlpha = ft.life / ft.maxLife;
+        ctx.font = 'bold 16px sans-serif';
+        ctx.fillStyle = ft.color;
+        ctx.strokeStyle = '#2f3542';
+        ctx.lineWidth = 3;
+        ctx.textAlign = 'center';
+        ctx.strokeText(ft.text, ft.x, ft.y);
+        ctx.fillText(ft.text, ft.x, ft.y);
+        ctx.restore();
+      });
+    }
+
+    function gameLoop() {
+      update();
+      render();
+      requestAnimationFrame(gameLoop);
+    }
+
+    /* ========================================================
+       9. UI 更新
+       ======================================================== */
+    function updateUI() {
+      document.getElementById('score').innerText = `${score} 点`;
+      document.getElementById('timer').innerText = `${timeLeft} 秒`;
+
+      const holdContainer = document.getElementById('players-holding');
+      holdContainer.innerHTML = '';
+      players.forEach(p => {
+        let desc = '素手';
+        if (p.holding) {
+          const names = {
+            tomato: '🍅トマト', lettuce: '🥬レタス', meat: '🥩肉', bun: '🍞バンズ',
+            cut_tomato: '🔪切トマト', cut_lettuce: '🔪切レタス'
+          };
+          if (names[p.holding.type]) {
+            desc = names[p.holding.type];
+          } else if (p.holding.type === 'plate') {
+            const c = p.holding.contents || [];
+            const icons = { tomato: '🍅', lettuce: '🥬', meat: '🥩', bun: '🍞', cut_tomato: '🍅', cut_lettuce: '🥬' };
+            desc = `🍽️皿[${c.map(x => icons[x]||x).join('')}]`;
+          }
+        }
+        const div = document.createElement('div');
+        div.innerHTML = `<span style="color:${p.color}; font-weight:bold;">${p.name}${p.id === myPlayerId ? '(自分)' : ''}:</span> ${desc}`;
+        holdContainer.appendChild(div);
+      });
+
+      const orderListEl = document.getElementById('order-list');
+      orderListEl.innerHTML = '';
+      orders.forEach(o => {
+        const div = document.createElement('div');
+        div.className = `order-card ${o.id === 'burger' ? 'burger-card' : ''}`;
+        
+        let reqDesc = '';
+        if (o.id === 'salad') reqDesc = '🍅カットトマト + 🥬カットレタス';
+        if (o.id === 'burger') reqDesc = '🍞バンズ + 🥩肉 + 🥬レタス + 🍅トマト';
+
+        const bonusSec = o.getBonus();
+
+        div.innerHTML = `
+          <div>
+            <strong>${o.name}</strong> <span style="font-size:11px; background:rgba(0,0,0,0.3); padding:2px 5px; border-radius:8px;">+${bonusSec}秒</span><br>
+            <small style="color:#f5f6fa;">具: ${reqDesc}</small>
+          </div>
+          <div style="font-size: 24px;">${o.icon}</div>
+        `;
+        orderListEl.appendChild(div);
+      });
+    }
+
+    // 起動
+    initDatabase().then(() => {
+      gameLoop();
+    });
+  </script>
+</body>
+</html>
