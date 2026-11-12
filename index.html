@@ -857,21 +857,7 @@
   sendNetMessage({ type: 'START_GAME', members: memberList });
   initMultiGame(memberList);
 }
-      currentMode = 'multi';
-      timeLeft = 60;
-      score = 0;
 
-      // 各自の clientId を保持して確実に送信！
-      const memberList = players.map(p => ({
-        id: p.id,
-        clientId: p.clientId,
-        name: p.name,
-        color: p.color
-      }));
-
-      sendNetMessage({ type: 'START_GAME', members: memberList });
-      initMultiGame(memberList);
-    }
 
     function showJoinLobby() {
       myPlayerName = getPlayerName();
