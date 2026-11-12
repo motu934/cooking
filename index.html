@@ -3,8 +3,6 @@
 <head>
   <meta charset="UTF-8">
   <title>お料理教室 - クッキングシミュレーション</title>
-  <!-- PeerJS (インターネット越しのマルチプレイ用CDN) -->
-  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -291,7 +289,6 @@
             👨‍🍳 モードを選んでスタート！ 👩‍🍳
           </h2>
           
-          <!-- プレイヤー名入力 -->
           <div class="name-input-box">
             <label for="player-name-input">🧑‍🍳 あなたのお名前:</label>
             <input type="text" id="player-name-input" maxlength="8" value="シェフ1" placeholder="シェフ1">
@@ -332,13 +329,11 @@
           <p style="font-size: 13px; color:#dcdde1; margin-top: 4px;">他の人にこの<strong>4桁のパスワード</strong>を教えてね：</p>
           <div class="room-code-display" id="host-code-display">----</div>
 
-          <div style="font-size: 13px; color:#a4b0be; text-align: left;">参加者リスト (最大3人):</div>
-          <div class="member-list" id="host-member-list">
-            <!-- メンバーが動的に表示される -->
-          </div>
+          <div style="font-size: 13px; color:#a4b0be; text-align: left;">参加メンバー (最大3人):</div>
+          <div class="member-list" id="host-member-list"></div>
 
           <button class="btn-main" id="btn-host-start" onclick="hostStartGame()">このメンバーでゲーム開始！</button>
-          <button class="btn-secondary" style="background:#57606f; margin-top: 8px;" onclick="backToTitle()">戻る</button>
+          <button class="btn-secondary" style="background:#57606f; margin-top: 8px;" onclick="backToTitle()">部屋を閉じる</button>
         </div>
 
         <!-- 画面3: 参加者パスワード入力画面 -->
@@ -348,17 +343,20 @@
           <div>
             <input type="text" id="join-code-input" class="code-input" maxlength="4" placeholder="1234">
           </div>
-          <button class="btn-main" onclick="joinRoom()">部屋に参加する</button>
+          <button class="btn-main" onclick="joinRoomDirect()">部屋に入る</button>
           <button class="btn-secondary" style="background:#57606f; margin-top: 8px;" onclick="backToTitle()">戻る</button>
         </div>
 
-        <!-- 画面4: 参加者待機ロビー -->
+        <!-- 画面4: 参加者待機ロビー (承認待ちなし！直接待機) -->
         <div id="view-client-waiting" class="lobby-box" style="display: none;">
-          <h3 style="color:#4cd137; font-size: 22px;">🎉 参加完了！</h3>
-          <p style="font-size: 13px; color:#dcdde1; margin-top: 6px;">リーダーがゲームを開始するのを待っています...</p>
+          <h3 style="color:#4cd137; font-size: 22px;">🎉 参加しました！</h3>
+          <p style="font-size: 13px; color:#dcdde1; margin-top: 6px;">リーダーがゲームを開始すると自動でスタートします！</p>
           <div class="room-code-display" id="client-code-display">----</div>
-          <div style="font-size: 14px; color:#fbc531;" id="client-my-slot">あなた: 2P (待機中)</div>
-          <button class="btn-secondary" style="background:#57606f; margin-top: 14px;" onclick="backToTitle()">退出する</button>
+          
+          <div style="font-size: 13px; color:#a4b0be; text-align: left;">現在のメンバー:</div>
+          <div class="member-list" id="client-member-list"></div>
+
+          <button class="btn-secondary" style="background:#57606f; margin-top: 10px;" onclick="leaveRoom()">退出する</button>
         </div>
       </div>
     </div>
@@ -477,13 +475,15 @@
     let myPlayerName = 'シェフ1';
     let currentMode = 'single';
     let isHost = true;
-    let myPlayerId = 1; // 1, 2, 3
+    let myPlayerId = 1;
     let roomCode = '';
+    let myClientId = 'user_' + Math.random().toString(36).substring(2, 9);
 
     let isGameRunning = false;
     let score = 0;
     let timeLeft = 70;
     let timerInterval = null;
+    let roomSyncInterval = null;
 
     const PLAYER_DEFAULTS = [
       { id: 1, name: '1P (青)', color: '#0984e3', startX: 300, startY: 260 },
@@ -532,7 +532,7 @@
     let orders = [];
 
     /* ========================================================
-       3. 入力管理 (自分のキャラクターの移動 & アクション)
+       3. 入力管理
        ======================================================== */
     const keys = {};
     window.addEventListener('keydown', (e) => {
@@ -546,7 +546,7 @@
         const me = players.find(p => p.id === myPlayerId);
         if (me) {
           interact(me);
-          broadcastMyAction();
+          saveMyPlayerToStorage();
         }
       }
     });
@@ -555,192 +555,23 @@
       keys[e.key.toLowerCase()] = false;
     });
 
-    /* ========================================================
-       4. 超強固なマルチ同期システム (LocalStorage + BroadcastChannel)
-       ======================================================== */
-    // ローカルストレージとBroadcastChannelを両方使って、同一PCの別ウィンドウ・別タブ間通信を100%保証
-    let syncInterval = null;
-    let myClientId = 'user_' + Math.random().toString(36).substring(2, 9);
-    let broadcastChannel = null;
-
     function getPlayerName() {
       const val = document.getElementById('player-name-input').value.trim();
       return val || 'シェフ';
     }
 
-    function setupMultiplayerSync(code) {
-      roomCode = code;
-      const roomKey = `iwamoto_cooking_room_${code}`;
-
-      if (broadcastChannel) broadcastChannel.close();
-      try {
-        broadcastChannel = new BroadcastChannel(roomKey);
-        broadcastChannel.onmessage = (e) => handleNetworkMessage(e.data);
-      } catch (err) {
-        console.log('BroadcastChannel fallback to LocalStorage');
-      }
-
-      // LocalStorageのstorageイベントも監視
-      window.addEventListener('storage', (e) => {
-        if (e.key === roomKey && e.newValue) {
-          try {
-            const data = JSON.parse(e.newValue);
-            handleNetworkMessage(data);
-          } catch(err){}
-        }
-      });
-
-      // 定期ポーリング (50ms)
-      if (syncInterval) clearInterval(syncInterval);
-      syncInterval = setInterval(() => {
-        // ホストは部屋情報をストレージに書き込み続ける
-        if (isHost && roomCode) {
-          const roomState = {
-            type: 'ROOM_HEARTBEAT',
-            hostName: myPlayerName,
-            members: players.map(p => ({ id: p.id, name: p.name, color: p.color })),
-            isGameRunning,
-            score,
-            timeLeft,
-            stations: stations.map(s => ({ item: s.item, progress: s.progress, chopAnim: s.chopAnim })),
-            orders
-          };
-          localStorage.setItem(roomKey, JSON.stringify(roomState));
-          if (broadcastChannel) broadcastChannel.postMessage(roomState);
-        } else if (!isHost && roomCode) {
-          // ゲストはストレージから最新状態を読む
-          const raw = localStorage.getItem(roomKey);
-          if (raw) {
-            try {
-              const data = JSON.parse(raw);
-              handleNetworkMessage(data);
-            } catch(e){}
-          }
-        }
-      }, 50);
-    }
-
-    function postNetMessage(msg) {
-      if (!roomCode) return;
-      const roomKey = `iwamoto_cooking_room_${roomCode}`;
-      try {
-        localStorage.setItem(roomKey + '_msg', JSON.stringify({ ...msg, _t: Date.now(), from: myClientId }));
-      } catch(e){}
-      if (broadcastChannel) {
-        broadcastChannel.postMessage(msg);
-      }
-    }
-
-    // メッセージハンドラ
-    function handleNetworkMessage(msg) {
-      if (!msg) return;
-
-      // --- ホスト側が受ける参加リクエスト ---
-      if (isHost) {
-        if (msg.type === 'JOIN_REQUEST' && msg.clientId !== myClientId) {
-          // すでにいるか確認
-          let existing = players.find(p => p.clientId === msg.clientId);
-          if (!existing && players.length < 3) {
-            const newSlot = players.length + 1;
-            const def = PLAYER_DEFAULTS[newSlot - 1];
-            players.push({
-              ...def,
-              clientId: msg.clientId,
-              name: msg.name || def.name,
-              x: def.startX, y: def.startY,
-              radius: 20, speed: 3.8, direction: 'down', holding: null
-            });
-
-            updateHostMemberList();
-            postNetMessage({
-              type: 'JOIN_APPROVED',
-              targetClientId: msg.clientId,
-              assignedSlot: newSlot,
-              members: players.map(p => ({ id: p.id, name: p.name, color: p.color }))
-            });
-          }
-        }
-      }
-
-      // --- 参加者側が受けるメッセージ ---
-      if (!isHost) {
-        if (msg.type === 'JOIN_APPROVED' && msg.targetClientId === myClientId) {
-          myPlayerId = msg.assignedSlot;
-          const def = PLAYER_DEFAULTS[myPlayerId - 1];
-          document.getElementById('client-my-slot').innerHTML = `
-            あなた: <strong style="color:${def.color}; font-size:16px;">${myPlayerId}P (${myPlayerName})</strong><br>
-            <span style="color:#4cd137;">✅ リーダーに認識されました！</span>
-          `;
-        }
-
-        if (msg.type === 'START_GAME_NOW') {
-          currentMode = 'multi';
-          timeLeft = 60;
-          score = 0;
-          initMultiGame(msg.members);
-        }
-      }
-
-      // --- ゲーム中の同期 ---
-      if (isGameRunning) {
-        if (msg.type === 'PLAYER_MOVE' && msg.id !== myPlayerId) {
-          const target = players.find(p => p.id === msg.id);
-          if (target) {
-            target.x = msg.x;
-            target.y = msg.y;
-            target.direction = msg.direction;
-            target.holding = msg.holding;
-          }
-        }
-        if (msg.type === 'ROOM_HEARTBEAT' && !isHost) {
-          // ホストからのステーション・スコア・タイマー同期
-          score = msg.score;
-          timeLeft = msg.timeLeft;
-          orders = msg.orders;
-          msg.stations.forEach((st, idx) => {
-            if (stations[idx]) {
-              stations[idx].item = st.item;
-              stations[idx].progress = st.progress;
-              stations[idx].chopAnim = st.chopAnim;
-            }
-          });
-          updateUI();
-        }
-        if (msg.type === 'ACTION_EFFECT') {
-          spawnParticles(msg.x, msg.y, msg.color, msg.count);
-        }
-        if (msg.type === 'FLOATING_TEXT') {
-          addFloatingText(msg.x, msg.y, msg.text, msg.color);
-        }
-      }
-    }
-
-    function broadcastMyAction() {
-      const me = players.find(p => p.id === myPlayerId);
-      if (!me) return;
-      postNetMessage({
-        type: 'PLAYER_MOVE',
-        id: me.id,
-        x: me.x, y: me.y,
-        direction: me.direction,
-        holding: me.holding
-      });
-    }
-
     /* ========================================================
-       5. 画面遷移 & ロビー制御
+       4. 承認なし！直接参加型マルチ同期システム (共有ストレージ)
        ======================================================== */
-    function backToTitle() {
-      if (syncInterval) clearInterval(syncInterval);
-      if (broadcastChannel) broadcastChannel.close();
-      roomCode = '';
-      document.getElementById('view-title').style.display = 'flex';
-      document.getElementById('view-host').style.display = 'none';
-      document.getElementById('view-join').style.display = 'none';
-      document.getElementById('view-client-waiting').style.display = 'none';
+    function getRoomStorageKey(code) {
+      return `iwamoto_direct_room_${code}`;
     }
 
-    // 1. シングルモード開始
+    function getPlayerStorageKey(code, pId) {
+      return `iwamoto_direct_p_${code}_${pId}`;
+    }
+
+    // 1. シングルモード
     function startSingleGame() {
       myPlayerName = getPlayerName();
       currentMode = 'single';
@@ -766,66 +597,101 @@
       updateUI();
     }
 
-    // 2. ホスト部屋作成
+    // 2. リーダー: 部屋作成
     function showHostLobby() {
       myPlayerName = getPlayerName();
       isHost = true;
       myPlayerId = 1;
 
-      const code = Math.floor(1000 + Math.random() * 9000).toString();
-      document.getElementById('host-code-display').innerText = code;
+      // 4桁コード生成
+      roomCode = Math.floor(1000 + Math.random() * 9000).toString();
+      document.getElementById('host-code-display').innerText = roomCode;
 
-      players = [{
-        ...PLAYER_DEFAULTS[0],
-        clientId: myClientId,
-        name: `${myPlayerName} (リーダー)`,
-        x: PLAYER_DEFAULTS[0].startX, y: PLAYER_DEFAULTS[0].startY,
-        radius: 20, speed: 3.8, direction: 'down', holding: null
-      }];
+      // 部屋データを直接LocalStorageに作成
+      const initialRoomData = {
+        code: roomCode,
+        isGameRunning: false,
+        members: [
+          { id: 1, clientId: myClientId, name: myPlayerName, color: PLAYER_DEFAULTS[0].color }
+        ],
+        score: 0,
+        timeLeft: 60,
+        stations: stations.map(s => ({ item: s.item, progress: s.progress, chopAnim: s.chopAnim })),
+        orders: [ { ...RECIPES.salad }, { ...RECIPES.burger } ],
+        updatedAt: Date.now()
+      };
+      localStorage.setItem(getRoomStorageKey(roomCode), JSON.stringify(initialRoomData));
 
       document.getElementById('view-title').style.display = 'none';
       document.getElementById('view-host').style.display = 'block';
 
-      setupMultiplayerSync(code);
-      updateHostMemberList();
+      renderMemberList('host-member-list', initialRoomData.members);
+      startHostRoomPolling();
     }
 
-    function updateHostMemberList() {
-      const container = document.getElementById('host-member-list');
-      container.innerHTML = '';
-      const icons = ['🟦', '🟥', '🟩'];
+    // ホストの定期監視
+    function startHostRoomPolling() {
+      if (roomSyncInterval) clearInterval(roomSyncInterval);
+      roomSyncInterval = setInterval(() => {
+        if (!roomCode) return;
+        const raw = localStorage.getItem(getRoomStorageKey(roomCode));
+        if (!raw) return;
 
-      players.forEach((p, idx) => {
-        const div = document.createElement('div');
-        div.style.padding = '4px 8px';
-        div.style.background = '#1e272e';
-        div.style.borderRadius = '4px';
-        div.innerHTML = `${icons[idx]} <strong style="color:${p.color};">${idx + 1}P:</strong> <strong>${p.name}</strong> <span style="color:#4cd137;">(準備完了)</span>`;
-        container.appendChild(div);
-      });
+        try {
+          const room = JSON.parse(raw);
 
-      if (players.length < 3) {
-        const div = document.createElement('div');
-        div.style.color = '#718093';
-        div.style.padding = '4px';
-        div.innerHTML = `⏳ 参加者を待っています... (${players.length}/3人)`;
-        container.appendChild(div);
-      }
+          // ゲーム開始前: メンバーリスト更新
+          if (!isGameRunning) {
+            renderMemberList('host-member-list', room.members);
+          } else {
+            // ゲーム中: ホストが部屋状態を書き込み維持
+            room.score = score;
+            room.timeLeft = timeLeft;
+            room.orders = orders;
+            room.stations = stations.map(s => ({ item: s.item, progress: s.progress, chopAnim: s.chopAnim }));
+            room.updatedAt = Date.now();
+            localStorage.setItem(getRoomStorageKey(roomCode), JSON.stringify(room));
+
+            // 他プレイヤーの位置情報を読み込む
+            room.members.forEach(m => {
+              if (m.id !== myPlayerId) {
+                const pRaw = localStorage.getItem(getPlayerStorageKey(roomCode, m.id));
+                if (pRaw) {
+                  const pData = JSON.parse(pRaw);
+                  const target = players.find(p => p.id === m.id);
+                  if (target) {
+                    target.x = pData.x;
+                    target.y = pData.y;
+                    target.direction = pData.direction;
+                    target.holding = pData.holding;
+                  }
+                }
+              }
+            });
+          }
+        } catch(e){}
+      }, 50);
     }
 
-    // ホストがゲーム開始
+    // ホストがゲーム開始ボタンを押した時
     function hostStartGame() {
+      const raw = localStorage.getItem(getRoomStorageKey(roomCode));
+      if (!raw) return;
+      const room = JSON.parse(raw);
+
+      room.isGameRunning = true;
+      room.timeLeft = 60;
+      room.score = 0;
+      room.updatedAt = Date.now();
+      localStorage.setItem(getRoomStorageKey(roomCode), JSON.stringify(room));
+
       currentMode = 'multi';
-      postNetMessage({
-        type: 'START_GAME_NOW',
-        members: players.map(p => ({ id: p.id, name: p.name, color: p.color }))
-      });
       timeLeft = 60;
       score = 0;
-      initMultiGame(players.map(p => ({ id: p.id, name: p.name, color: p.color })));
+      initMultiGame(room.members);
     }
 
-    // 3. 参加画面
+    // 3. 参加者: 部屋に入る
     function showJoinLobby() {
       myPlayerName = getPlayerName();
       document.getElementById('view-title').style.display = 'none';
@@ -833,7 +699,7 @@
       document.getElementById('join-code-input').value = '';
     }
 
-    function joinRoom() {
+    function joinRoomDirect() {
       myPlayerName = getPlayerName();
       const code = document.getElementById('join-code-input').value.trim();
       if (code.length !== 4) {
@@ -841,38 +707,158 @@
         return;
       }
 
+      // 部屋データを確認
+      const raw = localStorage.getItem(getRoomStorageKey(code));
+      if (!raw) {
+        alert(`パスワード「${code}」の部屋が見つかりません！\nリーダーが「部屋を作る」画面を開いているか確認してください。`);
+        return;
+      }
+
+      const room = JSON.parse(raw);
+      if (room.isGameRunning) {
+        alert('その部屋はすでにゲームが始まっています！');
+        return;
+      }
+
       isHost = false;
+      roomCode = code;
+
+      // 承認なし！直接メンバーに追加してLocalStorageに保存
+      let me = room.members.find(m => m.clientId === myClientId);
+      if (!me) {
+        if (room.members.length >= 3) {
+          alert('この部屋はすでに満員(3人)です！');
+          return;
+        }
+        myPlayerId = room.members.length + 1;
+        const def = PLAYER_DEFAULTS[myPlayerId - 1];
+        me = { id: myPlayerId, clientId: myClientId, name: myPlayerName, color: def.color };
+        room.members.push(me);
+        room.updatedAt = Date.now();
+        localStorage.setItem(getRoomStorageKey(code), JSON.stringify(room));
+      } else {
+        myPlayerId = me.id;
+      }
+
+      // 参加者待機画面へ即座に移動
       document.getElementById('view-join').style.display = 'none';
       document.getElementById('view-client-waiting').style.display = 'block';
       document.getElementById('client-code-display').innerText = code;
-      document.getElementById('client-my-slot').innerText = `リーダーに参加要求中...`;
 
-      setupMultiplayerSync(code);
+      renderMemberList('client-member-list', room.members);
+      startClientRoomPolling();
+    }
 
-      // 参加リクエストを連続送信して確実に届かせる
-      let reqCount = 0;
-      const joinTimer = setInterval(() => {
-        postNetMessage({
-          type: 'JOIN_REQUEST',
-          clientId: myClientId,
-          name: myPlayerName
-        });
-        reqCount++;
-        if (reqCount > 10 || myPlayerId > 1) {
-          clearInterval(joinTimer);
+    // 参加者の定期監視
+    function startClientRoomPolling() {
+      if (roomSyncInterval) clearInterval(roomSyncInterval);
+      roomSyncInterval = setInterval(() => {
+        if (!roomCode) return;
+        const raw = localStorage.getItem(getRoomStorageKey(roomCode));
+        if (!raw) return;
+
+        try {
+          const room = JSON.parse(raw);
+
+          // 開始前: メンバー更新
+          if (!isGameRunning) {
+            renderMemberList('client-member-list', room.members);
+            // リーダーが開始したのを検知したら即スタート！
+            if (room.isGameRunning) {
+              currentMode = 'multi';
+              timeLeft = room.timeLeft || 60;
+              score = room.score || 0;
+              initMultiGame(room.members);
+            }
+          } else {
+            // ゲーム中: ホストの盤面データと他プレイヤーの位置を同期
+            score = room.score;
+            timeLeft = room.timeLeft;
+            orders = room.orders;
+            room.stations.forEach((st, idx) => {
+              if (stations[idx]) {
+                stations[idx].item = st.item;
+                stations[idx].progress = st.progress;
+                stations[idx].chopAnim = st.chopAnim;
+              }
+            });
+            updateUI();
+
+            room.members.forEach(m => {
+              if (m.id !== myPlayerId) {
+                const pRaw = localStorage.getItem(getPlayerStorageKey(roomCode, m.id));
+                if (pRaw) {
+                  const pData = JSON.parse(pRaw);
+                  const target = players.find(p => p.id === m.id);
+                  if (target) {
+                    target.x = pData.x;
+                    target.y = pData.y;
+                    target.direction = pData.direction;
+                    target.holding = pData.holding;
+                  }
+                }
+              }
+            });
+          }
+        } catch(e){}
+      }, 50);
+    }
+
+    function renderMemberList(containerId, members) {
+      const container = document.getElementById(containerId);
+      if (!container) return;
+      container.innerHTML = '';
+      const icons = ['🟦', '🟥', '🟩'];
+
+      members.forEach((m, idx) => {
+        const div = document.createElement('div');
+        div.style.padding = '4px 8px';
+        div.style.background = '#1e272e';
+        div.style.borderRadius = '4px';
+        const isMe = (m.id === myPlayerId);
+        div.innerHTML = `${icons[idx]} <strong style="color:${m.color};">${m.id}P:</strong> <strong>${m.name}</strong> ${isMe ? '<span style="color:#fbc531;">(あなた)</span>' : '<span style="color:#4cd137;">(参加中)</span>'}`;
+        container.appendChild(div);
+      });
+
+      if (members.length < 3) {
+        const div = document.createElement('div');
+        div.style.color = '#718093';
+        div.style.padding = '4px';
+        div.innerHTML = `⏳ 参加可能... (${members.length}/3人)`;
+        container.appendChild(div);
+      }
+    }
+
+    function leaveRoom() {
+      if (roomCode) {
+        const raw = localStorage.getItem(getRoomStorageKey(roomCode));
+        if (raw) {
+          const room = JSON.parse(raw);
+          room.members = room.members.filter(m => m.clientId !== myClientId);
+          localStorage.setItem(getRoomStorageKey(roomCode), JSON.stringify(room));
         }
-      }, 300);
+      }
+      backToTitle();
+    }
+
+    function backToTitle() {
+      if (roomSyncInterval) clearInterval(roomSyncInterval);
+      roomCode = '';
+      document.getElementById('view-title').style.display = 'flex';
+      document.getElementById('view-host').style.display = 'none';
+      document.getElementById('view-join').style.display = 'none';
+      document.getElementById('view-client-waiting').style.display = 'none';
     }
 
     function initMultiGame(members) {
       document.getElementById('overlay-screen').style.display = 'none';
       document.getElementById('mode-label').innerText = `👥 マルチ (部屋:${roomCode})`;
 
-      // 参加者全員のプレイヤーインスタンスを生成
       players = members.map((m, idx) => {
         const def = PLAYER_DEFAULTS[idx];
         return {
           ...def,
+          id: m.id,
           name: m.name,
           color: m.color,
           x: def.startX, y: def.startY,
@@ -880,7 +866,6 @@
         };
       });
 
-      // 自分自身が必ずplayers配列に存在するように保証
       if (!players.find(p => p.id === myPlayerId)) {
         myPlayerId = 1;
       }
@@ -906,6 +891,19 @@
         { ...RECIPES.salad },
         { ...RECIPES.burger }
       ];
+    }
+
+    function saveMyPlayerToStorage() {
+      if (!roomCode || !isGameRunning) return;
+      const me = players.find(p => p.id === myPlayerId);
+      if (!me) return;
+      const data = {
+        x: me.x,
+        y: me.y,
+        direction: me.direction,
+        holding: me.holding
+      };
+      localStorage.setItem(getPlayerStorageKey(roomCode, myPlayerId), JSON.stringify(data));
     }
 
     function startTimer() {
@@ -952,7 +950,7 @@
     }
 
     /* ========================================================
-       6. インタラクション (自由な調理)
+       5. インタラクション (自由な調理)
        ======================================================== */
     function getFacingStation(player) {
       let targetX = player.x;
@@ -983,20 +981,16 @@
       const st = getFacingStation(player);
       if (!st) return;
 
-      // 1. 食材箱
       if (st.type === 'box' && !player.holding) {
         player.holding = { type: st.item };
       }
-      // 2. 皿ラック
       else if (st.type === 'plate_rack' && !player.holding) {
         player.holding = { type: 'plate', contents: [] };
       }
-      // 3. ゴミ箱
       else if (st.type === 'trash' && player.holding) {
         player.holding = null;
-        broadcastEffect(st.x + st.w/2, st.y + st.h/2, '#7f8c8d');
+        spawnParticles(st.x + st.w/2, st.y + st.h/2, '#7f8c8d');
       }
-      // 4. まな板
       else if (st.type === 'board') {
         if (!st.item && player.holding) {
           if (player.holding.type === 'tomato' || player.holding.type === 'lettuce') {
@@ -1008,7 +1002,7 @@
           if (st.progress < 100) {
             st.progress += 25;
             st.chopAnim = 12;
-            broadcastEffect(st.x + st.w/2, st.y + st.h/2, st.item.type === 'tomato' ? '#ff4757' : '#2ed573');
+            spawnParticles(st.x + st.w/2, st.y + st.h/2, st.item.type === 'tomato' ? '#ff4757' : '#2ed573');
             if (st.progress >= 100) {
               if (st.item.type === 'tomato') st.item = { type: 'cut_tomato' };
               if (st.item.type === 'lettuce') st.item = { type: 'cut_lettuce' };
@@ -1020,14 +1014,13 @@
               st.progress = 0;
             } else if (player.holding.type === 'plate') {
               player.holding.contents.push(st.item.type);
-              broadcastEffect(st.x + st.w/2, st.y + st.h/2, '#fbc531');
+              spawnParticles(st.x + st.w/2, st.y + st.h/2, '#fbc531');
               st.item = null;
               st.progress = 0;
             }
           }
         }
       }
-      // 5. 作業台
       else if (st.type === 'table') {
         if (!st.item && player.holding) {
           st.item = player.holding;
@@ -1035,11 +1028,11 @@
         } else if (st.item) {
           if (player.holding && player.holding.type === 'plate' && st.item.type !== 'plate') {
             player.holding.contents.push(st.item.type);
-            broadcastEffect(st.x + st.w/2, st.y + st.h/2, '#fbc531');
+            spawnParticles(st.x + st.w/2, st.y + st.h/2, '#fbc531');
             st.item = null;
           } else if (player.holding && player.holding.type !== 'plate' && st.item.type === 'plate') {
             st.item.contents.push(player.holding.type);
-            broadcastEffect(st.x + st.w/2, st.y + st.h/2, '#fbc531');
+            spawnParticles(st.x + st.w/2, st.y + st.h/2, '#fbc531');
             player.holding = null;
           } else if (!player.holding) {
             player.holding = st.item;
@@ -1047,7 +1040,6 @@
           }
         }
       }
-      // 6. 配膳口
       else if (st.type === 'delivery') {
         if (player.holding && player.holding.type === 'plate') {
           checkDelivery(player, player.holding);
@@ -1069,8 +1061,8 @@
         score += matched.reward;
         timeLeft += bonusSec;
 
-        broadcastFloatingText(player.x, player.y - 30, `+${bonusSec}秒! (+¥${matched.reward})`, '#2ed573');
-        broadcastEffect(canvas.width / 2, canvas.height / 2, '#fbc531', 40);
+        addFloatingText(player.x, player.y - 30, `+${bonusSec}秒! (+¥${matched.reward})`, '#2ed573');
+        spawnParticles(canvas.width / 2, canvas.height / 2, '#fbc531', 40);
 
         orders.splice(orderIdx, 1);
         
@@ -1081,19 +1073,9 @@
           updateUI();
         }, 1500);
       } else {
-        broadcastFloatingText(player.x, player.y - 30, `注文と違います！`, '#ff4757');
+        addFloatingText(player.x, player.y - 30, `注文と違います！`, '#ff4757');
       }
       updateUI();
-    }
-
-    function broadcastEffect(x, y, color, count = 12) {
-      spawnParticles(x, y, color, count);
-      postNetMessage({ type: 'ACTION_EFFECT', x, y, color, count });
-    }
-
-    function broadcastFloatingText(x, y, text, color) {
-      addFloatingText(x, y, text, color);
-      postNetMessage({ type: 'FLOATING_TEXT', x, y, text, color });
     }
 
     function addFloatingText(x, y, text, color) {
@@ -1114,7 +1096,7 @@
     }
 
     /* ========================================================
-       7. グラフィック描画
+       6. グラフィック描画
        ======================================================== */
     function drawTomato(x, y, size) {
       ctx.save();
@@ -1296,12 +1278,11 @@
     }
 
     /* ========================================================
-       8. ループ & レンダリング
+       7. ゲームループ & レンダリング
        ======================================================== */
     function update() {
       if (!isGameRunning) return;
 
-      // 自分のプレイヤーの移動 (WASD または 矢印キー)
       const me = players.find(p => p.id === myPlayerId);
       if (me) {
         let moved = false;
@@ -1313,10 +1294,9 @@
         me.x = Math.max(30, Math.min(canvas.width - 30, me.x));
         me.y = Math.max(30, Math.min(canvas.height - 30, me.y));
 
-        if (moved) broadcastMyAction();
+        if (moved) saveMyPlayerToStorage();
       }
 
-      // パーティクル
       for (let i = particles.length - 1; i >= 0; i--) {
         const pt = particles[i];
         pt.x += pt.vx;
@@ -1325,7 +1305,6 @@
         if (pt.alpha <= 0) particles.splice(i, 1);
       }
 
-      // フローティングテキスト
       for (let i = floatingTexts.length - 1; i >= 0; i--) {
         const ft = floatingTexts[i];
         ft.y -= 0.8;
@@ -1341,7 +1320,6 @@
     function render() {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-      // 床タイル
       const tileSize = 40;
       for (let r = 0; r < canvas.height / tileSize; r++) {
         for (let c = 0; c < canvas.width / tileSize; c++) {
@@ -1353,7 +1331,6 @@
       const me = players.find(p => p.id === myPlayerId);
       const myTargetStation = me ? getFacingStation(me) : null;
 
-      // ステーション描画
       stations.forEach(s => {
         const isTarget = (s === myTargetStation);
         ctx.save();
@@ -1445,7 +1422,6 @@
         ctx.restore();
       });
 
-      // エフェクト
       particles.forEach(p => {
         ctx.save();
         ctx.globalAlpha = p.alpha;
@@ -1456,7 +1432,6 @@
         ctx.restore();
       });
 
-      // プレイヤー描画 (全員)
       players.forEach(p => {
         ctx.save();
         ctx.translate(p.x, p.y);
@@ -1483,7 +1458,6 @@
         ctx.lineWidth = 1.5;
         ctx.stroke();
 
-        // プレイヤー名を表示 (頭上ネームプレート)
         ctx.fillStyle = '#1e272e';
         const nameText = p.id === myPlayerId ? `★ ${p.name} (自分)` : p.name;
         ctx.font = 'bold 11px sans-serif';
@@ -1510,7 +1484,6 @@
         ctx.restore();
       });
 
-      // 自分のアクション吹き出しヒント
       if (me && myTargetStation) {
         let hint = null;
         const p = me.holding;
@@ -1550,7 +1523,6 @@
         }
       }
 
-      // フローティングテキスト
       floatingTexts.forEach(ft => {
         ctx.save();
         ctx.globalAlpha = ft.life / ft.maxLife;
@@ -1572,7 +1544,7 @@
     }
 
     /* ========================================================
-       9. UI 更新
+       8. UI 更新
        ======================================================== */
     function updateUI() {
       document.getElementById('score').innerText = `${score} 点`;
