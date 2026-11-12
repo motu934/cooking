@@ -3,6 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <title>お料理教室 - クッキングシミュレーション</title>
+  <!-- インターネット越しに別のPC/スマホと直接通信する無料ライブラリ (PeerJS) -->
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -226,7 +228,7 @@
       border: 3px solid #fbc531;
       border-radius: 14px;
       padding: 22px 28px;
-      width: 450px;
+      width: 460px;
       text-align: center;
       box-shadow: 0 10px 30px rgba(0,0,0,0.5);
     }
@@ -274,7 +276,7 @@
 
   <div id="guide-banner">
     <div><span class="badge">操作</span> <strong>W, A, S, D</strong> または <strong>矢印キー</strong> で移動 | <strong>Space</strong> でアクション</div>
-    <div style="color: #fbc531;">※マルチモードでも、各自のブラウザで全員が自由に動けます！</div>
+    <div style="color: #fbc531;">🌐 インターネット・別PC・スマホでの合流に対応！</div>
   </div>
 
   <div id="game-container">
@@ -311,7 +313,7 @@
             <div class="mode-card">
               <h3>👥 マルチモード</h3>
               <p>
-                最大3人で自由にお料理！<br>
+                別PCやスマホの友達とも遊べる！<br>
                 役割の制限なし！誰でも何でもOK！<br>
                 <strong>初期タイム: 60秒</strong><br>
                 🥗 サラダ: <span style="color:#2ed573;">+5秒</span><br>
@@ -326,7 +328,7 @@
         <!-- 画面2: リーダー部屋作成ロビー -->
         <div id="view-host" class="lobby-box" style="display: none;">
           <h3 style="color:#fbc531; font-size: 22px;">👑 ルームを作成しました！</h3>
-          <p style="font-size: 13px; color:#dcdde1; margin-top: 4px;">他の人にこの<strong>4桁のパスワード</strong>を教えてね：</p>
+          <p style="font-size: 13px; color:#dcdde1; margin-top: 4px;">友達にこの<strong>4桁のパスワード</strong>を教えてね：</p>
           <div class="room-code-display" id="host-code-display">----</div>
 
           <div style="font-size: 13px; color:#a4b0be; text-align: left;">参加メンバー (最大3人):</div>
@@ -347,7 +349,7 @@
           <button class="btn-secondary" style="background:#57606f; margin-top: 8px;" onclick="backToTitle()">戻る</button>
         </div>
 
-        <!-- 画面4: 参加者待機ロビー (承認待ちなし！直接待機) -->
+        <!-- 画面4: 参加者待機ロビー (直接合流) -->
         <div id="view-client-waiting" class="lobby-box" style="display: none;">
           <h3 style="color:#4cd137; font-size: 22px;">🎉 参加しました！</h3>
           <p style="font-size: 13px; color:#dcdde1; margin-top: 6px;">リーダーがゲームを開始すると自動でスタートします！</p>
@@ -477,13 +479,18 @@
     let isHost = true;
     let myPlayerId = 1;
     let roomCode = '';
-    let myClientId = 'user_' + Math.random().toString(36).substring(2, 9);
+    let myClientId = 'client_' + Math.random().toString(36).substring(2, 9);
 
     let isGameRunning = false;
     let score = 0;
     let timeLeft = 70;
     let timerInterval = null;
-    let roomSyncInterval = null;
+
+    // WebRTC PeerJS接続
+    let peer = null;
+    let hostConnections = []; // ホスト側が持つ全クライアントのコネクション
+    let clientConnection = null; // ゲスト側が持つホストへのコネクション
+    let syncInterval = null;
 
     const PLAYER_DEFAULTS = [
       { id: 1, name: '1P (青)', color: '#0984e3', startX: 300, startY: 260 },
@@ -546,7 +553,7 @@
         const me = players.find(p => p.id === myPlayerId);
         if (me) {
           interact(me);
-          saveMyPlayerToStorage();
+          broadcastMyPlayer();
         }
       }
     });
@@ -561,14 +568,14 @@
     }
 
     /* ========================================================
-       4. 承認なし！直接参加型マルチ同期システム (共有ストレージ)
+       4. インターネット対応・P2P WebRTC & LocalStorage 通信
        ======================================================== */
-    function getRoomStorageKey(code) {
-      return `iwamoto_direct_room_${code}`;
+    function getPeerRoomId(code) {
+      return `motu_cook_room_${code}`;
     }
 
-    function getPlayerStorageKey(code, pId) {
-      return `iwamoto_direct_p_${code}_${pId}`;
+    function getRoomStorageKey(code) {
+      return `iwamoto_direct_room_${code}`;
     }
 
     // 1. シングルモード
@@ -602,93 +609,182 @@
       myPlayerName = getPlayerName();
       isHost = true;
       myPlayerId = 1;
+      hostConnections = [];
 
-      // 4桁コード生成
       roomCode = Math.floor(1000 + Math.random() * 9000).toString();
       document.getElementById('host-code-display').innerText = roomCode;
 
-      // 部屋データを直接LocalStorageに作成
-      const initialRoomData = {
-        code: roomCode,
-        isGameRunning: false,
-        members: [
-          { id: 1, clientId: myClientId, name: myPlayerName, color: PLAYER_DEFAULTS[0].color }
-        ],
-        score: 0,
-        timeLeft: 60,
-        stations: stations.map(s => ({ item: s.item, progress: s.progress, chopAnim: s.chopAnim })),
-        orders: [ { ...RECIPES.salad }, { ...RECIPES.burger } ],
-        updatedAt: Date.now()
-      };
-      localStorage.setItem(getRoomStorageKey(roomCode), JSON.stringify(initialRoomData));
+      players = [{
+        ...PLAYER_DEFAULTS[0],
+        clientId: myClientId,
+        name: `${myPlayerName} (リーダー)`,
+        x: PLAYER_DEFAULTS[0].startX, y: PLAYER_DEFAULTS[0].startY,
+        radius: 20, speed: 3.8, direction: 'down', holding: null
+      }];
 
       document.getElementById('view-title').style.display = 'none';
       document.getElementById('view-host').style.display = 'block';
 
-      renderMemberList('host-member-list', initialRoomData.members);
-      startHostRoomPolling();
+      renderMemberList('host-member-list', players);
+
+      // LocalStorageに初期登録 (同一PC用)
+      const initialData = {
+        code: roomCode,
+        isGameRunning: false,
+        members: players.map(p => ({ id: p.id, clientId: p.clientId, name: p.name, color: p.color }))
+      };
+      localStorage.setItem(getRoomStorageKey(roomCode), JSON.stringify(initialData));
+
+      // PeerJSでインターネット越しの参加者を待機
+      try {
+        if (peer) peer.destroy();
+        peer = new Peer(getPeerRoomId(roomCode));
+
+        peer.on('open', (id) => {
+          console.log('PeerJS Host ready:', id);
+        });
+
+        peer.on('connection', (conn) => {
+          hostConnections.push(conn);
+
+          conn.on('data', (data) => {
+            handleHostIncomingData(conn, data);
+          });
+
+          conn.on('close', () => {
+            hostConnections = hostConnections.filter(c => c !== conn);
+          });
+        });
+
+        peer.on('error', (err) => {
+          console.log('PeerJS error (falling back to LocalStorage):', err);
+        });
+      } catch(e) {
+        console.log('PeerJS not available:', e);
+      }
+
+      // 同一PCのLocalStorage監視
+      startHostPolling();
     }
 
-    // ホストの定期監視
-    function startHostRoomPolling() {
-      if (roomSyncInterval) clearInterval(roomSyncInterval);
-      roomSyncInterval = setInterval(() => {
+    function handleHostIncomingData(conn, data) {
+      if (data.type === 'DIRECT_JOIN') {
+        if (players.length < 3) {
+          const newSlot = players.length + 1;
+          const def = PLAYER_DEFAULTS[newSlot - 1];
+          const newMember = {
+            ...def,
+            id: newSlot,
+            clientId: data.clientId,
+            name: data.name,
+            x: def.startX, y: def.startY,
+            radius: 20, speed: 3.8, direction: 'down', holding: null
+          };
+          players.push(newMember);
+
+          renderMemberList('host-member-list', players);
+
+          // 参加者に合流成功メッセージ送信
+          conn.send({
+            type: 'JOINED_SUCCESS',
+            slot: newSlot,
+            members: players.map(p => ({ id: p.id, name: p.name, color: p.color }))
+          });
+
+          // 全クライアントにメンバー更新配信
+          broadcastToClients({
+            type: 'MEMBERS_UPDATE',
+            members: players.map(p => ({ id: p.id, name: p.name, color: p.color }))
+          });
+        }
+      } else if (data.type === 'PLAYER_UPDATE') {
+        const target = players.find(p => p.id === data.id);
+        if (target) {
+          target.x = data.x;
+          target.y = data.y;
+          target.direction = data.direction;
+          target.holding = data.holding;
+        }
+        // 他のゲストにも中継
+        broadcastToClients(data, conn);
+      }
+    }
+
+    function broadcastToClients(msg, excludeConn = null) {
+      hostConnections.forEach(c => {
+        if (c !== excludeConn && c.open) {
+          c.send(msg);
+        }
+      });
+      // 同一PC用にも保存
+      try {
+        localStorage.setItem(getRoomStorageKey(roomCode) + '_net', JSON.stringify({ ...msg, _t: Date.now() }));
+      } catch(e){}
+    }
+
+    function startHostPolling() {
+      if (syncInterval) clearInterval(syncInterval);
+      syncInterval = setInterval(() => {
         if (!roomCode) return;
+
+        // 同一PCのLocalStorageからの参加も拾う
         const raw = localStorage.getItem(getRoomStorageKey(roomCode));
-        if (!raw) return;
-
-        try {
-          const room = JSON.parse(raw);
-
-          // ゲーム開始前: メンバーリスト更新
-          if (!isGameRunning) {
-            renderMemberList('host-member-list', room.members);
-          } else {
-            // ゲーム中: ホストが部屋状態を書き込み維持
-            room.score = score;
-            room.timeLeft = timeLeft;
-            room.orders = orders;
-            room.stations = stations.map(s => ({ item: s.item, progress: s.progress, chopAnim: s.chopAnim }));
-            room.updatedAt = Date.now();
-            localStorage.setItem(getRoomStorageKey(roomCode), JSON.stringify(room));
-
-            // 他プレイヤーの位置情報を読み込む
-            room.members.forEach(m => {
-              if (m.id !== myPlayerId) {
-                const pRaw = localStorage.getItem(getPlayerStorageKey(roomCode, m.id));
-                if (pRaw) {
-                  const pData = JSON.parse(pRaw);
-                  const target = players.find(p => p.id === m.id);
-                  if (target) {
-                    target.x = pData.x;
-                    target.y = pData.y;
-                    target.direction = pData.direction;
-                    target.holding = pData.holding;
-                  }
+        if (raw) {
+          try {
+            const room = JSON.parse(raw);
+            if (!isGameRunning && room.members && room.members.length > players.length) {
+              room.members.forEach(m => {
+                if (!players.find(p => p.id === m.id)) {
+                  const def = PLAYER_DEFAULTS[m.id - 1];
+                  players.push({
+                    ...def,
+                    id: m.id, name: m.name, color: m.color,
+                    x: def.startX, y: def.startY,
+                    radius: 20, speed: 3.8, direction: 'down', holding: null
+                  });
                 }
-              }
-            });
-          }
-        } catch(e){}
+              });
+              renderMemberList('host-member-list', players);
+            }
+          } catch(e){}
+        }
+
+        // ゲーム中の盤面状態配信
+        if (isGameRunning) {
+          broadcastToClients({
+            type: 'GAME_SYNC',
+            score,
+            timeLeft,
+            orders,
+            stations: stations.map(s => ({ item: s.item, progress: s.progress, chopAnim: s.chopAnim }))
+          });
+        }
       }, 50);
     }
 
-    // ホストがゲーム開始ボタンを押した時
     function hostStartGame() {
-      const raw = localStorage.getItem(getRoomStorageKey(roomCode));
-      if (!raw) return;
-      const room = JSON.parse(raw);
-
-      room.isGameRunning = true;
-      room.timeLeft = 60;
-      room.score = 0;
-      room.updatedAt = Date.now();
-      localStorage.setItem(getRoomStorageKey(roomCode), JSON.stringify(room));
-
       currentMode = 'multi';
       timeLeft = 60;
       score = 0;
-      initMultiGame(room.members);
+
+      const memberList = players.map(p => ({ id: p.id, name: p.name, color: p.color }));
+
+      // 全員にゲーム開始合図
+      broadcastToClients({
+        type: 'GAME_START',
+        members: memberList
+      });
+
+      // 同一PCのLocalStorage更新
+      const raw = localStorage.getItem(getRoomStorageKey(roomCode));
+      if (raw) {
+        const room = JSON.parse(raw);
+        room.isGameRunning = true;
+        room.members = memberList;
+        localStorage.setItem(getRoomStorageKey(roomCode), JSON.stringify(room));
+      }
+
+      initMultiGame(memberList);
     }
 
     // 3. 参加者: 部屋に入る
@@ -707,101 +803,136 @@
         return;
       }
 
-      // 部屋データを確認
-      const raw = localStorage.getItem(getRoomStorageKey(code));
-      if (!raw) {
-        alert(`パスワード「${code}」の部屋が見つかりません！\nリーダーが「部屋を作る」画面を開いているか確認してください。`);
-        return;
-      }
-
-      const room = JSON.parse(raw);
-      if (room.isGameRunning) {
-        alert('その部屋はすでにゲームが始まっています！');
-        return;
-      }
-
       isHost = false;
       roomCode = code;
 
-      // 承認なし！直接メンバーに追加してLocalStorageに保存
-      let me = room.members.find(m => m.clientId === myClientId);
-      if (!me) {
-        if (room.members.length >= 3) {
-          alert('この部屋はすでに満員(3人)です！');
-          return;
-        }
-        myPlayerId = room.members.length + 1;
-        const def = PLAYER_DEFAULTS[myPlayerId - 1];
-        me = { id: myPlayerId, clientId: myClientId, name: myPlayerName, color: def.color };
-        room.members.push(me);
-        room.updatedAt = Date.now();
-        localStorage.setItem(getRoomStorageKey(code), JSON.stringify(room));
-      } else {
-        myPlayerId = me.id;
-      }
-
-      // 参加者待機画面へ即座に移動
       document.getElementById('view-join').style.display = 'none';
       document.getElementById('view-client-waiting').style.display = 'block';
       document.getElementById('client-code-display').innerText = code;
 
-      renderMemberList('client-member-list', room.members);
-      startClientRoomPolling();
-    }
+      renderMemberList('client-member-list', [
+        { id: 1, name: 'リーダー', color: PLAYER_DEFAULTS[0].color },
+        { id: 2, name: `${myPlayerName} (あなた)`, color: PLAYER_DEFAULTS[1].color }
+      ]);
 
-    // 参加者の定期監視
-    function startClientRoomPolling() {
-      if (roomSyncInterval) clearInterval(roomSyncInterval);
-      roomSyncInterval = setInterval(() => {
-        if (!roomCode) return;
-        const raw = localStorage.getItem(getRoomStorageKey(roomCode));
-        if (!raw) return;
-
+      // 1. 同一PCのLocalStorage参加
+      const raw = localStorage.getItem(getRoomStorageKey(code));
+      if (raw) {
         try {
           const room = JSON.parse(raw);
-
-          // 開始前: メンバー更新
-          if (!isGameRunning) {
-            renderMemberList('client-member-list', room.members);
-            // リーダーが開始したのを検知したら即スタート！
-            if (room.isGameRunning) {
-              currentMode = 'multi';
-              timeLeft = room.timeLeft || 60;
-              score = room.score || 0;
-              initMultiGame(room.members);
-            }
+          let me = room.members.find(m => m.clientId === myClientId);
+          if (!me) {
+            myPlayerId = room.members.length + 1;
+            const def = PLAYER_DEFAULTS[myPlayerId - 1];
+            me = { id: myPlayerId, clientId: myClientId, name: myPlayerName, color: def.color };
+            room.members.push(me);
+            localStorage.setItem(getRoomStorageKey(code), JSON.stringify(room));
           } else {
-            // ゲーム中: ホストの盤面データと他プレイヤーの位置を同期
-            score = room.score;
-            timeLeft = room.timeLeft;
-            orders = room.orders;
-            room.stations.forEach((st, idx) => {
-              if (stations[idx]) {
-                stations[idx].item = st.item;
-                stations[idx].progress = st.progress;
-                stations[idx].chopAnim = st.chopAnim;
-              }
-            });
-            updateUI();
-
-            room.members.forEach(m => {
-              if (m.id !== myPlayerId) {
-                const pRaw = localStorage.getItem(getPlayerStorageKey(roomCode, m.id));
-                if (pRaw) {
-                  const pData = JSON.parse(pRaw);
-                  const target = players.find(p => p.id === m.id);
-                  if (target) {
-                    target.x = pData.x;
-                    target.y = pData.y;
-                    target.direction = pData.direction;
-                    target.holding = pData.holding;
-                  }
-                }
-              }
-            });
+            myPlayerId = me.id;
           }
         } catch(e){}
-      }, 50);
+      }
+
+      // 2. インターネット越しのPeerJS接続
+      try {
+        if (peer) peer.destroy();
+        peer = new Peer();
+
+        peer.on('open', () => {
+          clientConnection = peer.connect(getPeerRoomId(code));
+
+          clientConnection.on('open', () => {
+            console.log('Connected to host via PeerJS!');
+            clientConnection.send({
+              type: 'DIRECT_JOIN',
+              clientId: myClientId,
+              name: myPlayerName
+            });
+          });
+
+          clientConnection.on('data', (data) => {
+            handleClientIncomingData(data);
+          });
+        });
+      } catch(e){}
+
+      // クライアント監視
+      startClientPolling();
+    }
+
+    function handleClientIncomingData(data) {
+      if (data.type === 'JOINED_SUCCESS') {
+        myPlayerId = data.slot;
+        renderMemberList('client-member-list', data.members);
+      } else if (data.type === 'MEMBERS_UPDATE') {
+        renderMemberList('client-member-list', data.members);
+      } else if (data.type === 'GAME_START') {
+        currentMode = 'multi';
+        timeLeft = 60;
+        score = 0;
+        initMultiGame(data.members);
+      } else if (data.type === 'GAME_SYNC') {
+        score = data.score;
+        timeLeft = data.timeLeft;
+        orders = data.orders;
+        data.stations.forEach((st, idx) => {
+          if (stations[idx]) {
+            stations[idx].item = st.item;
+            stations[idx].progress = st.progress;
+            stations[idx].chopAnim = st.chopAnim;
+          }
+        });
+        updateUI();
+      } else if (data.type === 'PLAYER_UPDATE') {
+        const target = players.find(p => p.id === data.id);
+        if (target && target.id !== myPlayerId) {
+          target.x = data.x;
+          target.y = data.y;
+          target.direction = data.direction;
+          target.holding = data.holding;
+        }
+      }
+    }
+
+    function startClientPolling() {
+      if (syncInterval) clearInterval(syncInterval);
+      syncInterval = setInterval(() => {
+        if (!roomCode || isGameRunning) return;
+
+        // 同一PCのLocalStorageからスタート検知
+        const raw = localStorage.getItem(getRoomStorageKey(roomCode));
+        if (raw) {
+          try {
+            const room = JSON.parse(raw);
+            if (room.members) renderMemberList('client-member-list', room.members);
+            if (room.isGameRunning) {
+              currentMode = 'multi';
+              timeLeft = 60;
+              score = 0;
+              initMultiGame(room.members);
+            }
+          } catch(e){}
+        }
+      }, 60);
+    }
+
+    function broadcastMyPlayer() {
+      const me = players.find(p => p.id === myPlayerId);
+      if (!me) return;
+      const data = {
+        type: 'PLAYER_UPDATE',
+        id: me.id,
+        x: me.x,
+        y: me.y,
+        direction: me.direction,
+        holding: me.holding
+      };
+
+      if (isHost) {
+        broadcastToClients(data);
+      } else if (clientConnection && clientConnection.open) {
+        clientConnection.send(data);
+      }
     }
 
     function renderMemberList(containerId, members) {
@@ -816,7 +947,7 @@
         div.style.background = '#1e272e';
         div.style.borderRadius = '4px';
         const isMe = (m.id === myPlayerId);
-        div.innerHTML = `${icons[idx]} <strong style="color:${m.color};">${m.id}P:</strong> <strong>${m.name}</strong> ${isMe ? '<span style="color:#fbc531;">(あなた)</span>' : '<span style="color:#4cd137;">(参加中)</span>'}`;
+        div.innerHTML = `${icons[idx]} <strong style="color:${m.color || PLAYER_DEFAULTS[idx].color};">${m.id}P:</strong> <strong>${m.name}</strong> ${isMe ? '<span style="color:#fbc531;">(あなた)</span>' : '<span style="color:#4cd137;">(参加中)</span>'}`;
         container.appendChild(div);
       });
 
@@ -830,19 +961,13 @@
     }
 
     function leaveRoom() {
-      if (roomCode) {
-        const raw = localStorage.getItem(getRoomStorageKey(roomCode));
-        if (raw) {
-          const room = JSON.parse(raw);
-          room.members = room.members.filter(m => m.clientId !== myClientId);
-          localStorage.setItem(getRoomStorageKey(roomCode), JSON.stringify(room));
-        }
-      }
+      if (peer) peer.destroy();
       backToTitle();
     }
 
     function backToTitle() {
-      if (roomSyncInterval) clearInterval(roomSyncInterval);
+      if (syncInterval) clearInterval(syncInterval);
+      if (peer) peer.destroy();
       roomCode = '';
       document.getElementById('view-title').style.display = 'flex';
       document.getElementById('view-host').style.display = 'none';
@@ -860,7 +985,7 @@
           ...def,
           id: m.id,
           name: m.name,
-          color: m.color,
+          color: m.color || def.color,
           x: def.startX, y: def.startY,
           radius: 20, speed: 3.8, direction: 'down', holding: null
         };
@@ -891,19 +1016,6 @@
         { ...RECIPES.salad },
         { ...RECIPES.burger }
       ];
-    }
-
-    function saveMyPlayerToStorage() {
-      if (!roomCode || !isGameRunning) return;
-      const me = players.find(p => p.id === myPlayerId);
-      if (!me) return;
-      const data = {
-        x: me.x,
-        y: me.y,
-        direction: me.direction,
-        holding: me.holding
-      };
-      localStorage.setItem(getPlayerStorageKey(roomCode, myPlayerId), JSON.stringify(data));
     }
 
     function startTimer() {
@@ -950,7 +1062,7 @@
     }
 
     /* ========================================================
-       5. インタラクション (自由な調理)
+       5. インタラクション
        ======================================================== */
     function getFacingStation(player) {
       let targetX = player.x;
@@ -1294,7 +1406,7 @@
         me.x = Math.max(30, Math.min(canvas.width - 30, me.x));
         me.y = Math.max(30, Math.min(canvas.height - 30, me.y));
 
-        if (moved) saveMyPlayerToStorage();
+        if (moved) broadcastMyPlayer();
       }
 
       for (let i = particles.length - 1; i >= 0; i--) {
@@ -1595,7 +1707,6 @@
       });
     }
 
-    // 起動
     initDatabase().then(() => {
       gameLoop();
     });
