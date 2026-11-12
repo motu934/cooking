@@ -295,7 +295,8 @@
 
   <div id="game-container">
     <div id="canvas-wrap">
-      <canvas id="gameCanvas" width="760" height="520"></canvas>
+      <canvas id="gameCanvas" width="760" height="520">    <!-- Host member list (shown in game overlay) -->
+    <div id="host-member-list" style="position:absolute; top:10px; left:10px; background:#1e272e; padding:8px; border-radius:4px; color:#f5f6fa; font-size:12px; display:block;"></div>
 
       <!-- モーダル・タイトル・ロビー画面 -->
       <div id="overlay-screen">
@@ -798,7 +799,10 @@
     }
 
     // リーダー: 部屋作成
-    function showHostLobby() {
+    // Ensure the host member list is visible
+    const hostListEl = document.getElementById('host-member-list');
+    if (hostListEl) hostListEl.style.display = 'block';
+
       myPlayerName = getPlayerName();
       isHost = true;
       myPlayerId = 1;
