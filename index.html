@@ -913,6 +913,29 @@
 
     // ゲーム初期化 (確実に自分のスロットを割り当て！)
     function initMultiGame(members) {
+      // 参加者リストをゲーム開始後も表示できるように更新
+      // members 配列は clientId を含んでいるので、players に正しく取得できる
+      players = members.map((m, idx) => {
+        const def = PLAYER_DEFAULTS[idx];
+        return {
+          ...def,
+          id: idx + 1,
+          clientId: m.clientId,
+          name: m.name,
+          color: m.color || def.color,
+          x: def.startX,
+          y: def.startY,
+          targetX: def.startX,
+          targetY: def.startY, // 補間用目標座標
+          radius: 20,
+          speed: 3.8,
+          direction: 'down',
+          holding: null
+        };
+      });
+      // ゲーム画面でもリーダーが参加者を確認できるようにリストを再描画
+      renderMemberList('host-member-list', players);
+
       document.getElementById('overlay-screen').style.display = 'none';
       document.getElementById('mode-label').innerText = `👥 マルチ (部屋:${roomCode})`;
 
